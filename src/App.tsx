@@ -111,7 +111,7 @@ function AppContent() {
 
         <div className="h-24 flex items-center px-6 border-b border-zinc-50 overflow-hidden">
           {sb ? (
-            <img src="/thirdwish-logo.png" alt="ThirdWish" className="max-w-[150px] h-auto object-contain mx-auto opacity-95" />
+            <img src="thirdwish-logo.png" alt="ThirdWish" className="max-w-[150px] h-auto object-contain mx-auto opacity-95" />
           ) : (
             <div className="mx-auto h-10 w-10 bg-gradient-to-br from-violet-600 to-indigo-600 rounded-xl flex items-center justify-center shadow-lg shadow-violet-200">
               <Brain className="h-6 w-6 text-white" />
