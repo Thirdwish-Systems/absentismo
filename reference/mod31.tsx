@@ -1,0 +1,812 @@
+﻿import React, { useMemo, useRef, useState } from "react";
+import { ArrowUp, Brain, Copy, RefreshCw, Search, Sparkles } from "lucide-react";
+
+/**
+ * MÓDULO 3 — Predicción & Decisión (VERSIÓN USABLE)
+ * - “Mapa de riesgos” = LISTA (sin elegir centro)
+ * - Horizonte: 1 semana · 2 semanas · 1 mes · 3 meses
+ * - Precisión orientativa (como el tiempo: baja con el horizonte)
+ * - Solo riesgos MEDIOS/ALTOS
+ * - Click => detalle + patrón + € + acción
+ * - Demo: garantiza 3 riesgos altos + 2 medios para ver la UI
+ */
+
+const DAY = 24 * 60 * 60 * 1000;
+const SHIFTS = ["Mañana", "Tarde", "Noche"] as const;
+const ROLES = ["Caja", "Reposición", "Picking", "Atención", "Producción"] as const;
+
+type Shift = (typeof SHIFTS)[number];
+type Role = (typeof ROLES)[number];
+
+type Horizon = "1w" | "2w" | "1m" | "3m";
+
+type Center = { id: string; name: string; size: number; criticidad: "Alta" | "Media" | "Baja" };
+
+type Driver = { label: string; s: number; why: string };
+
+type Cell = {
+  key: string;
+  centerId: string;
+  centerName: string;
+  criticidad: Center["criticidad"];
+  dayTs: number;
+  shift: Shift;
+  role: Role;
+  planned: number;
+  minOp: number;
+  riskAbs: number; // %
+  riskBreak: number; // %
+  absType: string;
+  durDays: number;
+  eur: number;
+  eurNP: number;
+  pattern: string;
+  why: string;
+  drivers: Driver[];
+};
+
+type Obs = { actualBreak: boolean; ts: number };
+
+type Msg = { id: string; role: "user" | "assistant"; text: string; ts: number };
+
+type Plan = { name: string; owner: string; deadline: string; riskDown: number; cost: number; net: number; roi: number; desc: string };
+
+const CENTERS: Center[] = [
+  { id: "MAD-ALC", name: "Madrid · Alcorcón", size: 78, criticidad: "Alta" },
+  { id: "BCN-ZF", name: "Barcelona · Zona Franca", size: 84, criticidad: "Alta" },
+  { id: "VAL-TUR", name: "Valencia · Turia", size: 56, criticidad: "Media" },
+  { id: "SEV-NEV", name: "Sevilla · Nervión", size: 44, criticidad: "Media" },
+  { id: "BIL-IBA", name: "Bilbao · Ibaiondo", size: 38, criticidad: "Baja" },
+  { id: "ZAR-DEL", name: "Zaragoza · Delicias", size: 40, criticidad: "Media" },
+];
+
+/* ---------------- helpers ---------------- */
+
+const cn = (...xs: Array<string | false | null | undefined>) => xs.filter(Boolean).join(" ");
+const clamp = (n: number, a: number, b: number) => Math.min(b, Math.max(a, n));
+const pct = (n: number) => `${Math.round(clamp(n, 0, 100))}%`;
+const iso = (d: number) => new Date(d).toISOString().slice(0, 10);
+const ddmm = (d: number) => new Intl.DateTimeFormat("es-ES", { day: "2-digit", month: "2-digit" }).format(new Date(d));
+const dow = (d: number) => ["Dom", "Lun", "Mar", "Mié", "Jue", "Vie", "Sáb"][new Date(d).getDay()];
+const money = (n: number) =>
+  new Intl.NumberFormat("es-ES", { style: "currency", currency: "EUR", maximumFractionDigits: 0 }).format(
+    Number.isFinite(n) ? n : 0
+  );
+
+function startOfToday() {
+  const t = new Date();
+  return new Date(t.getFullYear(), t.getMonth(), t.getDate()).getTime();
+}
+
+function mkId() {
+  return `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+}
+
+function hashStr(s: string) {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
+function rand01(seed: string) {
+  return (hashStr(seed) % 10000) / 10000;
+}
+
+function riskTone(r: number) {
+  const x = clamp(r, 0, 100);
+  if (x >= 70) return { label: "ALTO", dot: "bg-rose-600", brd: "border-rose-200", bg: "bg-rose-50", tx: "text-rose-950" };
+  if (x >= 40) return { label: "MEDIO", dot: "bg-amber-500", brd: "border-amber-200", bg: "bg-amber-50", tx: "text-amber-950" };
+  return { label: "BAJO", dot: "bg-emerald-500", brd: "border-emerald-200", bg: "bg-emerald-50", tx: "text-emerald-950" };
+}
+
+function horizonLabel(h: Horizon) {
+  return h === "1w" ? "1 semana" : h === "2w" ? "2 semanas" : h === "1m" ? "1 mes" : "3 meses";
+}
+
+function horizonDays(h: Horizon) {
+  return h === "1w" ? 7 : h === "2w" ? 14 : h === "1m" ? 30 : 90;
+}
+
+function buildDays(h: Horizon) {
+  const start = startOfToday();
+  const n = horizonDays(h);
+  return Array.from({ length: n }, (_, i) => start + i * DAY);
+}
+
+function accuracyFor(h: Horizon, samples: number) {
+  // Precisión “tipo tiempo”: baja por horizonte; mejora un poco con muestras.
+  const base = h === "1w" ? 88 : h === "2w" ? 80 : h === "1m" ? 68 : 55;
+  const bonus = clamp(samples * 0.6, 0, 10);
+  return clamp(base + bonus, 40, 92);
+}
+
+function keyOf(centerId: string, dayTs: number, shift: Shift, role: Role) {
+  return `${centerId}__${iso(dayTs)}__${shift}__${role}`;
+}
+
+function scoreRisk(c: Cell) {
+  const critW = c.criticidad === "Alta" ? 1.15 : c.criticidad === "Media" ? 1 : 0.9;
+  return (c.riskBreak * 1000 + Math.round(c.eurNP / 10)) * critW;
+}
+
+function Pill({ cls, children, title }: { cls: string; children: React.ReactNode; title?: string }) {
+  return (
+    <span title={title} className={cn("inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold", cls)}>
+      {children}
+    </span>
+  );
+}
+
+function Btn({ tone = "zinc", onClick, children }: { tone?: "zinc" | "violet" | "dark"; onClick?: () => void; children: React.ReactNode }) {
+  const base =
+    "inline-flex items-center gap-2 rounded-full border px-3 py-2 text-xs font-semibold shadow-sm transition focus:outline-none focus:ring-2 focus:ring-violet-300";
+  const cls =
+    tone === "violet"
+      ? "border-violet-200 bg-violet-50 text-violet-900 hover:bg-violet-100"
+      : tone === "dark"
+      ? "border-zinc-900/10 bg-zinc-900 text-white hover:bg-zinc-800"
+      : "border-zinc-200 bg-white text-zinc-900 hover:bg-zinc-50";
+  return (
+    <button type="button" className={cn(base, cls)} onClick={onClick}>
+      {children}
+    </button>
+  );
+}
+
+function Card({ title, desc, right, children }: { title: string; desc?: string; right?: React.ReactNode; children: React.ReactNode }) {
+  return (
+    <div className="rounded-[28px] border border-zinc-200 bg-white shadow-sm">
+      <div className="flex items-start justify-between gap-3 p-5">
+        <div>
+          <div className="text-sm font-semibold text-zinc-900">{title}</div>
+          {desc ? <div className="mt-1 text-xs text-zinc-500">{desc}</div> : null}
+        </div>
+        {right}
+      </div>
+      <div className="h-px w-full bg-zinc-100" />
+      <div className="p-5">{children}</div>
+    </div>
+  );
+}
+
+function Stat({ label, value, hint }: { label: string; value: string; hint?: string }) {
+  return (
+    <div className="rounded-2xl border border-zinc-200 bg-white p-3">
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-[11px] font-semibold text-zinc-600">{label}</div>
+        {hint ? (
+          <div className="text-[11px] text-zinc-400" title={hint}>
+            ??
+          </div>
+        ) : null}
+      </div>
+      <div className="mt-1 text-sm font-semibold text-zinc-900">{value}</div>
+    </div>
+  );
+}
+
+/* ---------------- motor demo ---------------- */
+
+function calcCell(center: Center, dayTs: number, shift: Shift, role: Role, cal: number): Cell {
+  const seed = `${center.id}|${dayTs}|${shift}|${role}`;
+  const wDay = new Date(dayTs).getDay();
+  const dayIdx = Math.floor((dayTs - startOfToday()) / DAY);
+
+  const shiftW = shift === "Noche" ? 0.9 : shift === "Mañana" ? 1.05 : 1;
+  const roleW = role === "Producción" ? 1.2 : role === "Picking" ? 1.1 : role === "Caja" ? 0.9 : 1;
+  const base = center.size / (SHIFTS.length * 2.1);
+  const planned = Math.max(2, Math.round(base * shiftW * roleW + rand01(seed + "|hc") * 2));
+  const minOp = Math.max(1, Math.round(planned * 0.85));
+
+  const fat = clamp(0.2 + 0.7 * rand01(seed + "|fat") + (shift === "Noche" ? 0.08 : 0), 0, 1);
+  const chg = clamp(0.15 + 0.75 * rand01(seed + "|chg") + (shift === "Tarde" ? 0.05 : 0), 0, 1);
+  const cons = clamp(0.2 + 0.7 * rand01(seed + "|cons") + (shift === "Noche" ? 0.08 : 0), 0, 1);
+  const cx = clamp(0.2 + 0.7 * rand01(center.id + "|cx"), 0, 1);
+  const rot = clamp(0.08 + 0.28 * rand01(center.id + "|rot"), 0, 1);
+
+  const heat = dayIdx >= 6 && dayIdx <= 9 ? 0.18 : 0;
+  const camp = dayIdx >= 7 && dayIdx <= 11 && (wDay === 4 || wDay === 5) ? 0.18 : 0;
+  const recurrent = (role === "Caja" && wDay === 5 ? 0.12 : 0) + (center.id === "SEV-NEV" && role === "Picking" && wDay === 1 ? 0.18 : 0);
+  const ext = clamp(heat + camp + recurrent, 0, 0.6);
+
+  const riskAbs = clamp((0.14 + 0.35 * fat + 0.2 * chg + 0.22 * ext + 0.15 * rot) * 100, 5, 95);
+
+  const absentExp = clamp(planned * (0.03 + 0.04 * fat + 0.02 * ext + 0.012 * chg), 0, Math.max(0, planned - 0.5));
+  const presentExp = planned - absentExp;
+  const gap = Math.max(0, (minOp - presentExp) / Math.max(1, minOp));
+  const riskBreak = clamp((gap * 120 + riskAbs * 0.25 + cx * 14) * (1 + cal), 0, 100);
+
+  const absType = ext > 0.28 ? "Ausencia no planificada" : fat > 0.6 ? "Baja (IT) corta" : "Permiso puntual";
+  const durDays = clamp(1.1 + (absType === "Baja (IT) corta" ? 2.7 : 1.1) + ext * 1.2, 1, 6);
+
+  const costPerDay = 220;
+  const baseCost = absentExp * costPerDay;
+  const urgent = riskBreak >= 70 ? 1.25 : 1;
+  const sub = baseCost * 0.55 * urgent * (1 + fat * 0.25);
+  const hidden = (riskBreak / 100) * absentExp * 140;
+  const eur = baseCost + sub + hidden;
+  const eurNP = Math.max(0, eur - baseCost);
+
+  let pattern = "Mixto";
+  let why = "Riesgo moderado; decide por impacto y rapidez.";
+  if (ext >= 0.35) {
+    pattern = `Pico externo (${dow(dayTs)})`;
+    why = "Factores externos elevan el riesgo en una fecha concreta.";
+  } else if (fat >= 0.62 && cons >= 0.62) {
+    pattern = "Espiral de fatiga";
+    why = "Fatiga + turnos seguidos ? bola de nieve.";
+  } else if (planned <= 3) {
+    pattern = "Mínimo crítico";
+    why = "Vas justo: una ausencia te deja por debajo del mínimo.";
+  } else if (chg >= 0.62) {
+    pattern = "Fricción por cambios";
+    why = "Cambios elevan urgencias y coste fuera de presupuesto.";
+  } else if (cx >= 0.66 && rot >= 0.2) {
+    pattern = "Fragilidad estructural";
+    why = "Mismo % puede costar más por complejidad.";
+  }
+
+  const drivers: Driver[] = [
+    { label: "Fatiga", s: fat, why: "Horas extra/descanso ? sube ausencias." },
+    { label: "Turnos seguidos", s: cons, why: "Bloques sin descanso ? aumenta el pico." },
+    { label: "Cambios de turno", s: chg, why: "Variabilidad ? más urgencia y coste." },
+    { label: "Factores externos", s: ext, why: "Clima/campañas/eventos ? amplifican." },
+    { label: "Rotación", s: rot, why: "Vacantes crónicas ? más carga." },
+    { label: "Complejidad", s: cx, why: "SLA/rigidez ? fragilidad." },
+  ];
+
+  return {
+    key: keyOf(center.id, dayTs, shift, role),
+    centerId: center.id,
+    centerName: center.name,
+    criticidad: center.criticidad,
+    dayTs,
+    shift,
+    role,
+    planned,
+    minOp,
+    riskAbs,
+    riskBreak,
+    absType,
+    durDays,
+    eur,
+    eurNP,
+    pattern,
+    why,
+    drivers,
+  };
+}
+
+function plansFor(cell: Cell): Plan[] {
+  const base = cell.eur;
+  const br = cell.riskBreak;
+  const critW = cell.criticidad === "Alta" ? 1.1 : cell.criticidad === "Media" ? 1.0 : 0.9;
+
+  const defs = [
+    { name: "Refuerzo preventivo", desc: "Bolsa/ETT con antelación.", owner: "RRHH + Operaciones", deadline: "48h", costF: 0.22, brF: 0.45, min: 10, max: 55 },
+    { name: "Mover cobertura", desc: "Reequilibrar desde unidad similar.", owner: "Operaciones", deadline: "24–48h", costF: 0.12, brF: 0.3, min: 8, max: 40 },
+    { name: "Ajuste de turnos", desc: "Reducir cambios/turnos seguidos.", owner: "Planificación", deadline: "72h", costF: 0.05, brF: 0.18, min: 5, max: 28 },
+  ];
+
+  return defs
+    .map((d) => {
+      const cost = base * d.costF;
+      const riskDown = clamp(br * d.brF * critW, d.min, d.max);
+      const newEur = base * (1 - (riskDown / 100) * 0.55);
+      const savings = Math.max(0, base - newEur);
+      const net = Math.max(0, savings - cost);
+      const roi = cost ? Math.round(((savings - cost) / cost) * 100) : 0;
+      return { name: d.name, desc: d.desc, owner: d.owner, deadline: d.deadline, riskDown, cost, net, roi };
+    })
+    .sort((a, b) => b.net - a.net || b.riskDown - a.riskDown);
+}
+
+function ensureDemoCounts(cells: Cell[]) {
+  // Ajusta algunos riesgos para que la demo SIEMPRE muestre 3 altos + 2 medios.
+  const sorted = cells.slice().sort((a, b) => scoreRisk(b) - scoreRisk(a));
+  const overrides: Record<string, Partial<Cell>> = {};
+
+  const getRB = (c: Cell) => overrides[c.key]?.riskBreak ?? c.riskBreak;
+  const countHigh = () => sorted.filter((c) => getRB(c) >= 70).length;
+  const countMid = () => sorted.filter((c) => {
+    const rb = getRB(c);
+    return rb >= 40 && rb < 70;
+  }).length;
+
+  const hiTargets = [84, 78, 72];
+  const midTargets = [62, 48];
+
+  let h = countHigh();
+  if (h < 3) {
+    let idx = 0;
+    for (const c of sorted) {
+      if (h >= 3) break;
+      const rb = getRB(c);
+      if (rb < 70) {
+        overrides[c.key] = { ...(overrides[c.key] || {}), riskBreak: hiTargets[idx] ?? 74, riskAbs: clamp(c.riskAbs + 8, 5, 95) };
+        idx++;
+        h++;
+      }
+    }
+  }
+
+  let m = countMid();
+  if (m < 2) {
+    let idx = 0;
+    for (const c of sorted) {
+      if (m >= 2) break;
+      const rb = getRB(c);
+      if (rb < 40) {
+        overrides[c.key] = { ...(overrides[c.key] || {}), riskBreak: midTargets[idx] ?? 55, riskAbs: clamp(c.riskAbs + 4, 5, 95) };
+        idx++;
+        m++;
+      }
+    }
+  }
+
+  if (!Object.keys(overrides).length) return cells;
+  return cells.map((c) => (overrides[c.key] ? ({ ...c, ...overrides[c.key] } as Cell) : c));
+}
+
+function copilotReply(q: string, ctx: { sel: Cell; top: Cell[]; acc: number; horizon: string }) {
+  const t = String(q || "").toLowerCase();
+  const { sel, top, acc, horizon } = ctx;
+
+  const head = [
+    `Horizonte: ${horizon} · Precisión orientativa: ${pct(acc)}`,
+    `Selección: ${sel.centerName} · ${dow(sel.dayTs)} ${iso(sel.dayTs)} · ${sel.shift} · ${sel.role}`,
+    `Probabilidad de rotura: ${pct(sel.riskBreak)} (quedarse por debajo del mínimo operativo)`
+  ].join("\n");
+
+  if (t.includes("dónde") || t.includes("donde") || t.includes("mayor") || t.includes("prior")) {
+    const lines = top.slice(0, 6).map((c, i) =>
+      `${i + 1}) ${c.centerName} · ${dow(c.dayTs)} ${ddmm(c.dayTs)} · ${c.shift} · ${c.role} · rotura ${pct(c.riskBreak)} · fuera de presupuesto ${money(c.eurNP)}`
+    );
+    return [head, "", "Riesgos más urgentes:", "", ...lines].join("\n");
+  }
+
+  if (t.includes("acciones") || t.includes("qué hago") || t.includes("que hago")) {
+    const ps = plansFor(sel).slice(0, 3).map((p, i) =>
+      `${i + 1}) ${p.name} · rotura ? ${pct(p.riskDown)} · neto ${money(p.net)} · ROI ${p.roi}% · ${p.owner} · ${p.deadline}`
+    );
+    return [head, "", "Acciones recomendadas (por impacto neto):", "", ...ps].join("\n");
+  }
+
+  if (t.includes("por qué") || t.includes("porque") || t.includes("causa") || t.includes("explica")) {
+    const ds = sel.drivers.slice().sort((a, b) => b.s - a.s).slice(0, 4).map((d) => `• ${d.label}: ${pct(d.s * 100)} — ${d.why}`);
+    return [head, "", `Patrón: ${sel.pattern}`, `${sel.why}`, "", "Causas probables (no médicas):", "", ...ds].join("\n");
+  }
+
+  if (t.includes("precisión") || t.includes("precision") || t.includes("acierto")) {
+    return [
+      head,
+      "",
+      "Cómo leer la precisión:",
+      "• 1 semana: suele ser bastante fiable.",
+      "• 1 mes: hay más incertidumbre.",
+      "• 3 meses: úsalo para preparar plan, no para prometer exactitud.",
+    ].join("\n");
+  }
+
+  return [head, "", "Pídeme: 'dónde está el mayor riesgo', 'acciones', 'por qué', 'precisión'."].join("\n");
+}
+
+/* ---------------- UI ---------------- */
+
+export default function Modulo3PredictivoLista() {
+  const [horizon, setHorizon] = useState<Horizon>("2w");
+  const [query, setQuery] = useState("");
+  const [onlyHigh, setOnlyHigh] = useState(false);
+
+  const [cal, setCal] = useState<Record<string, number>>({});
+  const [obs, setObs] = useState<Record<string, Obs>>({});
+  const [selKey, setSelKey] = useState<string>(keyOf(CENTERS[0].id, startOfToday(), SHIFTS[0], ROLES[0]));
+
+  const days = useMemo(() => buildDays(horizon), [horizon]);
+
+  const all = useMemo(() => {
+    const out: Cell[] = [];
+    for (const c of CENTERS) {
+      const calV = cal[c.id] || 0;
+      for (const d of days) for (const s of SHIFTS) for (const r of ROLES) out.push(calcCell(c, d, s, r, calV));
+    }
+    return ensureDemoCounts(out);
+  }, [days, cal]);
+
+  const samples = useMemo(() => Object.keys(obs).length, [obs]);
+  const acc = useMemo(() => accuracyFor(horizon, samples), [horizon, samples]);
+
+  const riskMin = onlyHigh ? 70 : 40;
+
+  const risks = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return all
+      .filter((c) => c.riskBreak >= riskMin)
+      .filter((c) => {
+        if (!q) return true;
+        return [c.centerName, iso(c.dayTs), dow(c.dayTs), c.shift, c.role, c.pattern, c.absType].join(" ").toLowerCase().includes(q);
+      })
+      .sort((a, b) => scoreRisk(b) - scoreRisk(a))
+      .slice(0, 60);
+  }, [all, query, riskMin]);
+
+  const sel = useMemo(() => {
+    const f = all.find((c) => c.key === selKey);
+    return f || risks[0] || all[0];
+  }, [all, selKey, risks]);
+
+  const best = useMemo(() => plansFor(sel)[0], [sel]);
+
+  const summary = useMemo(() => {
+    const high = all.filter((c) => c.riskBreak >= 70).length;
+    const mid = all.filter((c) => c.riskBreak >= 40 && c.riskBreak < 70).length;
+    const np = all.reduce((a, c) => a + c.eurNP, 0);
+    const maxB = all.reduce((m, c) => Math.max(m, c.riskBreak), 0);
+    return { high, mid, np, maxB };
+  }, [all]);
+
+  const [msgs, setMsgs] = useState<Msg[]>([
+    { id: mkId(), role: "assistant", ts: Date.now(), text: "Soy tu Copiloto. Prueba: 'dónde está el mayor riesgo', 'acciones', 'por qué', 'precisión'." },
+  ]);
+  const [draft, setDraft] = useState("");
+  const endRef = useRef<HTMLDivElement | null>(null);
+
+  function push(role: Msg["role"], text: string) {
+    setMsgs((p) => [...p, { id: mkId(), role, text, ts: Date.now() }]);
+    setTimeout(() => endRef.current?.scrollIntoView({ behavior: "smooth" }), 30);
+  }
+
+  function send(text?: string) {
+    const qq = (text ?? draft).trim();
+    if (!qq) return;
+    setDraft("");
+    push("user", qq);
+    const top = risks.slice(0, 10);
+    push("assistant", copilotReply(qq, { sel, top, acc, horizon: horizonLabel(horizon) }));
+  }
+
+  function reset() {
+    setQuery("");
+    setOnlyHigh(false);
+    setMsgs((p) => p.slice(0, 1));
+  }
+
+  function copySel() {
+    const txt = [
+      `${sel.centerName} · ${dow(sel.dayTs)} ${iso(sel.dayTs)} · ${sel.shift} · ${sel.role}`,
+      `Prob. rotura: ${pct(sel.riskBreak)} (bajar del mínimo operativo) · Prob. bajas: ${pct(sel.riskAbs)}`,
+      `Coste estimado: ${money(sel.eur)} · Fuera de presupuesto: ${money(sel.eurNP)}`,
+      `Patrón: ${sel.pattern} · Acción: ${best.name} (${best.deadline})`,
+    ].join("\n");
+    try {
+      navigator.clipboard.writeText(txt);
+    } catch {
+      // noop
+    }
+  }
+
+  function registerReality() {
+    // Demo: “realidad” binaria para alimentar la precisión.
+    const pred = clamp(sel.riskBreak / 100, 0, 1);
+    const actualBreak = rand01(sel.key + "|act") < pred * 0.9;
+
+    setObs((p) => ({ ...p, [sel.key]: { actualBreak, ts: Date.now() } }));
+    // Recalibración simple por centro
+    setCal((p) => {
+      const act = actualBreak ? 1 : 0;
+      const next = clamp((p[sel.centerId] || 0) + 0.1 * (act - pred), -0.25, 0.25);
+      return { ...p, [sel.centerId]: next };
+    });
+  }
+
+  const selTone = riskTone(sel.riskBreak);
+
+  return (
+    <div className="min-h-screen bg-zinc-50">
+      <div className="mx-auto max-w-[1500px] px-4 py-6">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Pill cls="border-violet-200 bg-violet-50 text-violet-900"><Sparkles className="h-4 w-4" /><span className="ml-1">Predicción de rotura</span></Pill>
+              <Pill cls="border-zinc-200 bg-white text-zinc-800">sin elegir centro</Pill>
+              <Pill cls="border-zinc-200 bg-white text-zinc-800" title="Mostramos solo probabilidades de rotura MEDIAS/ALTAS.">solo medio/alto</Pill>
+            </div>
+            <h1 className="mt-3 text-2xl font-semibold tracking-tight text-zinc-900">Riesgos futuros (continuidad + €)</h1>
+            <p className="mt-1 max-w-3xl text-sm text-zinc-600">
+              <span className="font-semibold">Probabilidad de rotura</span> = posibilidad de quedarse por debajo del <span className="font-semibold">mínimo operativo</span> en un día/turno/rol.
+              <span className="ml-2 text-zinc-500">Cuanto más lejos el horizonte, más incertidumbre (como el tiempo).</span>
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="rounded-full border border-zinc-200 bg-white p-1 shadow-sm">
+              {(["1w", "2w", "1m", "3m"] as Horizon[]).map((h) => (
+                <button
+                  key={h}
+                  type="button"
+                  onClick={() => setHorizon(h)}
+                  className={cn(
+                    "rounded-full px-3 py-2 text-xs font-semibold",
+                    horizon === h ? "bg-violet-600 text-white" : "text-zinc-700 hover:bg-zinc-50"
+                  )}
+                >
+                  {horizonLabel(h)}
+                </button>
+              ))}
+            </div>
+            <Pill cls="border-zinc-200 bg-white text-zinc-800" title="Precisión orientativa: baja con el horizonte y mejora con el aprendizaje.">Precisión {pct(acc)}</Pill>
+            <Btn onClick={reset}><RefreshCw className="h-4 w-4" />Reset</Btn>
+          </div>
+        </div>
+
+        <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-12">
+          {/* IZQUIERDA */}
+          <div className="lg:col-span-8 space-y-4">
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
+              <Stat label="Riesgos altos" value={String(summary.high)} hint="Prob. rotura = 70%." />
+              <Stat label="Riesgos medios" value={String(summary.mid)} hint="Prob. rotura 40–69%." />
+              <Stat label="Fuera de presupuesto" value={money(summary.np)} hint="Coste extra por urgencia/sustitución (no planificado)." />
+              <Stat label="Máxima prob. rotura" value={pct(summary.maxB)} hint="La mayor probabilidad de rotura del horizonte." />
+            </div>
+
+            <Card
+              title="Lista de riesgos"
+              desc={onlyHigh ? "Mostrando solo lo más crítico." : "Mostrando riesgos medios y altos."}
+              right={
+                <div className="flex flex-wrap items-center gap-2">
+                  <label className="relative">
+                    <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-zinc-400" />
+                    <input
+                      value={query}
+                      onChange={(e) => setQuery(e.target.value)}
+                      placeholder="Buscar centro, fecha, patrón..."
+                      className="w-[270px] rounded-full border border-zinc-200 bg-white py-2 pl-9 pr-3 text-xs font-semibold text-zinc-900 outline-none focus:ring-2 focus:ring-violet-300"
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => setOnlyHigh((v) => !v)}
+                    className={cn(
+                      "rounded-full border px-3 py-2 text-xs font-semibold",
+                      onlyHigh ? "border-rose-200 bg-rose-50 text-rose-950" : "border-zinc-200 bg-white text-zinc-700"
+                    )}
+                    title="Actívalo para ver solo prob. rotura = 70%."
+                  >
+                    Solo altos
+                  </button>
+                </div>
+              }
+            >
+              {risks.length ? (
+                <div className="space-y-2">
+                  {risks.map((c) => {
+                    const t = riskTone(c.riskBreak);
+                    const active = c.key === sel.key;
+                    return (
+                      <button
+                        key={c.key}
+                        type="button"
+                        onClick={() => setSelKey(c.key)}
+                        className={cn(
+                          "w-full rounded-2xl border p-4 text-left transition focus:outline-none focus:ring-2 focus:ring-violet-300",
+                          active ? "border-violet-300 bg-white" : "border-zinc-200 bg-white hover:bg-zinc-50"
+                        )}
+                      >
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div className="flex items-start gap-3">
+                            <div className={cn("mt-1 h-3 w-3 rounded-full", t.dot)} />
+                            <div>
+                              <div className="flex flex-wrap items-center gap-2">
+                                <div className="text-sm font-semibold text-zinc-900">{c.centerName}</div>
+                                <Pill cls={cn("border", t.brd, t.bg, t.tx)} title="Probabilidad de quedarse por debajo del mínimo operativo.">
+                                  Prob. rotura {pct(c.riskBreak)}
+                                </Pill>
+                                <Pill cls="border-zinc-200 bg-white text-zinc-800">{dow(c.dayTs)} {ddmm(c.dayTs)} · {c.shift} · {c.role}</Pill>
+                                <Pill cls="border-zinc-200 bg-white text-zinc-800">Criticidad {c.criticidad}</Pill>
+                              </div>
+                              <div className="mt-1 text-xs text-zinc-600">
+                                <span className="font-semibold">Patrón:</span> {c.pattern} · {c.absType} ({c.durDays.toFixed(1)} días)
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="text-right">
+                            <div className="text-xs text-zinc-500" title="Coste total esperado si ocurre el escenario.">Coste</div>
+                            <div className="text-sm font-semibold text-zinc-900">{money(c.eur)}</div>
+                            <div className="mt-0.5 text-xs text-amber-700" title="Coste extra por urgencia/sustitución (suele no estar presupuestado).">
+                              Fuera de presupuesto {money(c.eurNP)}
+                            </div>
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4 text-sm text-zinc-700">No hay riesgos con estos filtros.</div>
+              )}
+            </Card>
+
+            <Card
+              title="Detalle del riesgo"
+              desc="Por qué pasa, cuánto cuesta y qué hacer. (Agregado; nunca personas.)"
+              right={
+                <div className="flex items-center gap-2">
+                  <Btn onClick={copySel}><Copy className="h-4 w-4" />Copiar</Btn>
+                  <Btn tone="violet" onClick={() => send("acciones")}>Pedir acciones</Btn>
+                </div>
+              }
+            >
+              <div className="space-y-4">
+                <div className={cn("rounded-2xl border p-4", selTone.bg, selTone.brd)}>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Pill cls="border-zinc-200 bg-white text-zinc-800">{sel.centerName}</Pill>
+                      <Pill cls="border-zinc-200 bg-white text-zinc-800">{dow(sel.dayTs)} {iso(sel.dayTs)}</Pill>
+                      <Pill cls="border-zinc-200 bg-white text-zinc-800">{sel.shift}</Pill>
+                      <Pill cls="border-zinc-200 bg-white text-zinc-800">{sel.role}</Pill>
+                      <Pill cls="border-zinc-200 bg-white text-zinc-800">Plantilla {sel.planned} · Mínimo {sel.minOp}</Pill>
+                    </div>
+                    <Pill cls="border-violet-200 bg-violet-50 text-violet-900">IA (previsión + señales)</Pill>
+                  </div>
+
+                  <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-4">
+                    <Stat label="Prob. rotura" value={pct(sel.riskBreak)} hint="Quedar por debajo del mínimo operativo." />
+                    <Stat label="Prob. bajas" value={pct(sel.riskAbs)} hint="Ausencias agregadas (no personas)." />
+                    <Stat label="Coste" value={money(sel.eur)} hint="Coste total esperado." />
+                    <Stat label="Fuera de presupuesto" value={money(sel.eurNP)} hint="Sobrecoste por urgencia/sustitución." />
+                  </div>
+
+                  <div className="mt-3 rounded-2xl border border-zinc-200 bg-white p-3 text-xs text-zinc-700">
+                    <div><span className="font-semibold">Patrón:</span> {sel.pattern}</div>
+                    <div className="mt-1 text-zinc-600">{sel.why}</div>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                  <div className="rounded-2xl border border-zinc-200 bg-white p-4">
+                    <div className="text-xs font-semibold text-zinc-900">Causas probables (no médicas)</div>
+                    <div className="mt-3 space-y-2">
+                      {sel.drivers
+                        .slice()
+                        .sort((a, b) => b.s - a.s)
+                        .slice(0, 4)
+                        .map((d) => (
+                          <div key={d.label} className="rounded-2xl border border-zinc-200 bg-white p-3">
+                            <div className="flex items-center justify-between">
+                              <div className="text-xs font-semibold text-zinc-900">{d.label}</div>
+                              <Pill cls="border-zinc-200 bg-white text-zinc-800">{pct(d.s * 100)}</Pill>
+                            </div>
+                            <div className="mt-1 text-xs text-zinc-600">{d.why}</div>
+                          </div>
+                        ))}
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border border-zinc-200 bg-white p-4">
+                    <div className="text-xs font-semibold text-zinc-900">Qué hacer ahora</div>
+                    <div className="mt-2 rounded-2xl border border-violet-200 bg-violet-50 p-3">
+                      <div className="text-sm font-semibold text-violet-950">{best.name}</div>
+                      <div className="mt-1 text-xs text-violet-900">{best.desc}</div>
+                      <div className="mt-2 text-xs text-violet-900">Responsable: <span className="font-semibold">{best.owner}</span> · Plazo: <span className="font-semibold">{best.deadline}</span></div>
+                      <div className="mt-3 grid grid-cols-2 gap-2">
+                        <Stat label="Rotura ?" value={pct(best.riskDown)} hint="Reducción estimada del riesgo de rotura." />
+                        <Stat label="Impacto neto" value={money(best.net)} hint="Ahorro menos coste de la acción." />
+                        <Stat label="Coste" value={money(best.cost)} hint="Coste estimado de aplicar la acción." />
+                        <Stat label="ROI" value={`${best.roi}%`} hint="(Ahorro - coste) / coste." />
+                      </div>
+                      <div className="mt-3 flex flex-wrap items-center gap-2">
+                        <Btn tone="violet" onClick={() => alert("? Caso creado (demo)")}>Crear caso</Btn>
+                        <Btn tone="violet" onClick={registerReality}><RefreshCw className="h-4 w-4" />Registrar realidad</Btn>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </Card>
+          </div>
+
+          {/* DERECHA: Copiloto */}
+          <div className="lg:col-span-4">
+            <div className="sticky top-6 h-[calc(100vh-48px)] overflow-hidden rounded-[28px] border border-zinc-200 bg-white shadow-sm">
+              <div className="p-4 bg-gradient-to-br from-zinc-950 via-zinc-900 to-violet-950">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    <div className="inline-flex h-10 w-10 items-center justify-center rounded-2xl bg-white/10 border border-white/10">
+                      <Brain className="h-5 w-5 text-white" />
+                    </div>
+                    <div>
+                      <div className="text-sm font-semibold text-white">Copiloto IA</div>
+                      <div className="text-xs text-white/70">Te digo dónde actuar y qué hacer</div>
+                    </div>
+                  </div>
+                  <Pill cls="border-white/10 bg-white/10 text-white"><Sparkles className="h-4 w-4" /><span className="ml-1">Activo</span></Pill>
+                </div>
+
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {[
+                    { k: "dónde está el mayor riesgo", l: "Mayor riesgo" },
+                    { k: "acciones", l: "Acciones" },
+                    { k: "por qué", l: "Por qué" },
+                    { k: "precisión", l: "Precisión" },
+                  ].map((x) => (
+                    <button
+                      key={x.k}
+                      type="button"
+                      onClick={() => send(x.k)}
+                      className="rounded-full border border-white/10 bg-white/10 px-3 py-1.5 text-xs font-semibold text-white hover:bg-white/15"
+                    >
+                      {x.l}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="mt-3 rounded-2xl border border-white/10 bg-white/5 p-3 text-xs text-white/80">
+                  Selección: <span className="font-semibold text-white">{sel.centerName} · {dow(sel.dayTs)} {ddmm(sel.dayTs)} · {sel.shift} · {sel.role}</span>
+                </div>
+              </div>
+
+              <div className="flex h-[calc(100%-184px)] flex-col">
+                <div className="flex-1 overflow-auto p-4">
+                  <div className="space-y-3">
+                    {msgs.map((m) => (
+                      <div
+                        key={m.id}
+                        className={cn(
+                          "max-w-[95%] rounded-2xl border px-3 py-2 text-xs whitespace-pre-wrap",
+                          m.role === "assistant" ? "border-zinc-200 bg-zinc-50 text-zinc-800" : "ml-auto border-violet-200 bg-violet-50 text-violet-950"
+                        )}
+                      >
+                        {m.text}
+                      </div>
+                    ))}
+                    <div ref={endRef} />
+                  </div>
+                </div>
+
+                <div className="border-t border-zinc-200 bg-white p-3">
+                  <div className="flex items-end gap-2">
+                    <textarea
+                      value={draft}
+                      onChange={(e) => setDraft(e.target.value)}
+                      rows={2}
+                      placeholder="Pregunta en lenguaje natural..."
+                      className="w-full resize-none rounded-2xl border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 outline-none focus:ring-2 focus:ring-violet-300"
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && !e.shiftKey) {
+                          e.preventDefault();
+                          send();
+                        }
+                      }}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => send()}
+                      className="inline-flex h-10 w-10 items-center justify-center rounded-2xl bg-violet-600 text-white shadow-sm transition hover:bg-violet-700 focus:outline-none focus:ring-2 focus:ring-violet-300"
+                      title="Enviar"
+                    >
+                      <ArrowUp className="h-5 w-5" />
+                    </button>
+                  </div>
+                  <div className="mt-2 flex items-center justify-between">
+                    <div className="text-[11px] text-zinc-500">Enter envía · Shift+Enter salto</div>
+                    <button
+                      type="button"
+                      onClick={() => setMsgs((p) => p.slice(0, 1))}
+                      className="rounded-full border border-zinc-200 bg-white px-3 py-1.5 text-xs font-semibold text-zinc-700 hover:bg-zinc-50"
+                    >
+                      Limpiar
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}

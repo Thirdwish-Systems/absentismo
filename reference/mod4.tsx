@@ -1,0 +1,513 @@
+﻿// @ts-nocheck
+import React, { useMemo, useState } from "react";
+
+/**
+ * MÓDULO 4 — Workflows (DEMO)
+ * - Activos (solo Crítico/Importante)
+ * - Al clicar un caso: detalle (sin EPAR, sin Planes A/B/C, sin feedback)
+ * - Tareas: check verde si hecha (las de HOY vienen marcadas)
+ * - Crear workflow: pantalla aparte (modal) accesible desde la principal
+ */
+
+// ---------- UI ----------
+const Badge = ({ tone = "zinc", children }) => {
+  const cls =
+    tone === "red"
+      ? "bg-red-50 text-red-700 border-red-200"
+      : tone === "amber"
+      ? "bg-amber-50 text-amber-800 border-amber-200"
+      : tone === "green"
+      ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+      : tone === "violet"
+      ? "bg-violet-50 text-violet-700 border-violet-200"
+      : "bg-zinc-50 text-zinc-700 border-zinc-200";
+  return (
+    <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-medium ${cls}`}>{children}</span>
+  );
+};
+
+const Card = ({ title, right, children }) => (
+  <div className="rounded-[24px] border border-zinc-200 bg-white shadow-sm">
+    <div className="flex items-start justify-between gap-3 px-5 py-4">
+      <div className="text-sm font-semibold text-zinc-900">{title}</div>
+      {right ? <div className="shrink-0">{right}</div> : null}
+    </div>
+    <div className="h-px w-full bg-zinc-100" />
+    <div className="p-5">{children}</div>
+  </div>
+);
+
+const Stat = ({ label, value, tone = "zinc" }) => (
+  <div
+    className={
+      "rounded-2xl border p-3 shadow-sm " +
+      (tone === "violet"
+        ? "border-violet-200 bg-violet-50"
+        : tone === "red"
+        ? "border-red-200 bg-red-50"
+        : tone === "amber"
+        ? "border-amber-200 bg-amber-50"
+        : tone === "green"
+        ? "border-emerald-200 bg-emerald-50"
+        : "border-zinc-200 bg-white")
+    }
+  >
+    <div className="text-[11px] font-medium text-zinc-600">{label}</div>
+    <div className="mt-1 text-sm font-semibold text-zinc-900">{value}</div>
+  </div>
+);
+
+const Row = ({ k, v }) => (
+  <div className="flex items-start justify-between gap-3">
+    <div className="text-sm font-medium text-zinc-900">{k}</div>
+    <div className="text-sm text-zinc-700 text-right">{v}</div>
+  </div>
+);
+
+const TextInput = ({ value, onChange, placeholder }) => (
+  <input
+    value={value}
+    onChange={(e) => onChange?.(e.target.value)}
+    placeholder={placeholder}
+    className="w-full rounded-2xl border border-zinc-200 bg-white px-4 py-2.5 text-sm text-zinc-900 shadow-sm outline-none focus:ring-4 focus:ring-zinc-100"
+  />
+);
+
+const Textarea = ({ value, onChange, placeholder, h = "h-28" }) => (
+  <textarea
+    value={value}
+    onChange={(e) => onChange?.(e.target.value)}
+    placeholder={placeholder}
+    className={`${h} w-full resize-none rounded-2xl border border-zinc-200 bg-white px-4 py-2.5 text-sm text-zinc-900 shadow-sm outline-none focus:ring-4 focus:ring-zinc-100`}
+  />
+);
+
+const Btn = ({ primary, onClick, children }) => (
+  <button
+    type="button"
+    onClick={onClick}
+    className={
+      "rounded-2xl px-4 py-2 text-sm font-medium shadow-sm transition " +
+      (primary ? "bg-violet-600 text-white hover:bg-violet-700" : "border border-zinc-200 bg-white text-zinc-800 hover:bg-zinc-50")
+    }
+  >
+    {children}
+  </button>
+);
+
+const Modal = ({ open, title, subtitle, onClose, children }) => {
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 z-50">
+      <div className="absolute inset-0 bg-zinc-950/30" onClick={onClose} />
+      <div className="absolute inset-x-0 top-5 mx-auto max-w-6xl px-3">
+        <div className="rounded-[24px] border border-zinc-200 bg-white shadow-xl">
+          <div className="flex items-start justify-between gap-3 px-5 py-4">
+            <div>
+              <div className="text-sm font-semibold text-zinc-900">{title}</div>
+              {subtitle ? <div className="mt-1 text-xs text-zinc-500">{subtitle}</div> : null}
+            </div>
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-2xl border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-800 shadow-sm hover:bg-zinc-50"
+            >
+              ?
+            </button>
+          </div>
+          <div className="h-px w-full bg-zinc-100" />
+          <div className="max-h-[80vh] overflow-auto p-5">{children}</div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const sevTone = (sev) => (sev === "critico" ? "red" : "amber");
+const sevLabel = (sev) => (sev === "critico" ? "Crítico" : "Importante");
+
+// ---------- Data (demo) ----------
+const DEMO_CASES = [
+  {
+    id: "#231",
+    sev: "critico",
+    title: "Caso #231 — Riesgo de rotura (75%) · Centro crítico Sevilla",
+    unit: "Centro Sevilla",
+    priority: "Alta",
+    deadline: "72h",
+    responsibles: "HR Operaciones + Jefe Centro Sevilla",
+    objective: "Mantener mínimo operativo",
+    metrics: { prob: "75%", after: "34%", pnl: "9.000 €", roi: "2,0x", exec: "35%" },
+    next: "Operaciones: Confirmar mínimo operativo (HOY)",
+    tasks: [
+      { id: "t1", area: "Operaciones", what: "Confirmar mínimo operativo de turno", who: "Jefe Centro Sevilla · Luis Herrera", due: "HOY", done: true },
+      { id: "t2", area: "RRHH", what: "Activar bolsa interna", who: "HR Operaciones · María Gómez", due: "HOY", done: true },
+      { id: "t3", area: "Planificación", what: "Simulación automática de 2 alternativas de turnos", who: "Planificación · Andrea Ruiz", due: "26/01/26 14:00", done: false },
+      { id: "t4", area: "Proveedor ETT", what: "Pre-reserva de 2 perfiles (por si falla bolsa interna)", who: "Cuenta ETT", due: "26/01/26 16:00", done: false },
+      { id: "t5", area: "Seguimiento", what: "Check-cobertura + decisión", who: "Operaciones · Pablo Medina", due: "26/01/26", done: false },
+    ],
+  },
+  {
+    id: "#246",
+    sev: "importante",
+    title: "Caso #246 — Fatiga estructural (62%) · Planta A",
+    unit: "Planta A",
+    priority: "Media",
+    deadline: "96h",
+    responsibles: "Operaciones + Planificación",
+    objective: "Reducir fatiga en 14 días",
+    metrics: { prob: "62%", after: "42%", pnl: "4.200 €", roi: "1,3x", exec: "20%" },
+    next: "Planificación: Replanificar 7 días",
+    tasks: [
+      { id: "f1", area: "Operaciones", what: "Validar horas extra rolling", who: "Operaciones · Pablo Medina", due: "HOY", done: true },
+      { id: "f2", area: "Planificación", what: "Replanificar 7 días", who: "Planificación · Andrea Ruiz", due: "26/01/26", done: false },
+      { id: "f3", area: "RRHH", what: "Reforzar cobertura parcial", who: "HR Operaciones · María Gómez", due: "26/01/26", done: false },
+    ],
+  },
+];
+
+function WorkflowBuilder({ state, setState, onClose }) {
+  const {
+    wfName,
+    wfSev,
+    wfTrigP,
+    wfTrigEur,
+    wfWindow,
+    wfOwner,
+    wfDesc,
+    steps,
+  } = state;
+
+  const set = (patch) => setState((s) => ({ ...s, ...patch }));
+  const setOwner = (patch) => setState((s) => ({ ...s, wfOwner: { ...s.wfOwner, ...patch } }));
+  const addStep = () => {
+    setState((s) => ({
+      ...s,
+      steps: s.steps.concat([{ id: `s${s.steps.length + 1}`, role: "", name: "", email: "", phone: "", desc: "" }]),
+    }));
+  };
+  const patchStep = (id, patch) =>
+    setState((s) => ({ ...s, steps: s.steps.map((x) => (x.id === id ? { ...x, ...patch } : x)) }));
+
+  return (
+    <div className="grid gap-4">
+      <div className="grid gap-3 sm:grid-cols-2">
+        <div>
+          <div className="text-sm font-medium text-zinc-900">Nombre workflow</div>
+          <div className="mt-2"><TextInput value={wfName} onChange={(v) => set({ wfName: v })} /></div>
+        </div>
+        <div>
+          <div className="text-sm font-medium text-zinc-900">Criticidad</div>
+          <div className="mt-2"><TextInput value={wfSev} onChange={(v) => set({ wfSev: v })} /></div>
+        </div>
+      </div>
+
+      <div className="grid gap-3 sm:grid-cols-3">
+        <div>
+          <div className="text-sm font-medium text-zinc-900">Trigger prob =</div>
+          <div className="mt-2"><TextInput value={wfTrigP} onChange={(v) => set({ wfTrigP: v })} /></div>
+        </div>
+        <div>
+          <div className="text-sm font-medium text-zinc-900">Trigger impacto = €</div>
+          <div className="mt-2"><TextInput value={wfTrigEur} onChange={(v) => set({ wfTrigEur: v })} /></div>
+        </div>
+        <div>
+          <div className="text-sm font-medium text-zinc-900">Ventana (días)</div>
+          <div className="mt-2"><TextInput value={wfWindow} onChange={(v) => set({ wfWindow: v })} /></div>
+        </div>
+      </div>
+
+      <div className="rounded-[22px] border border-zinc-200 bg-white p-4 shadow-sm">
+        <div className="flex items-center justify-between gap-2">
+          <div className="text-sm font-semibold text-zinc-900">Owner principal</div>
+          <Badge tone="violet">Obligatorio</Badge>
+        </div>
+        <div className="mt-3 grid gap-2 sm:grid-cols-2">
+          <TextInput value={wfOwner.role} onChange={(v) => setOwner({ role: v })} placeholder="Cargo" />
+          <TextInput value={wfOwner.name} onChange={(v) => setOwner({ name: v })} placeholder="Nombre y apellidos" />
+          <TextInput value={wfOwner.email} onChange={(v) => setOwner({ email: v })} placeholder="Email" />
+          <TextInput value={wfOwner.phone} onChange={(v) => setOwner({ phone: v })} placeholder="Móvil" />
+        </div>
+      </div>
+
+      <div className="rounded-[22px] border border-zinc-200 bg-white p-4 shadow-sm">
+        <div className="text-sm font-semibold text-zinc-900">Descripción / Objetivo</div>
+        <div className="mt-2"><Textarea value={wfDesc} onChange={(v) => set({ wfDesc: v })} /></div>
+      </div>
+
+      <div className="rounded-[22px] border border-zinc-200 bg-white p-4 shadow-sm">
+        <div className="flex items-center justify-between gap-2">
+          <div>
+            <div className="text-sm font-semibold text-zinc-900">Pasos (workflow)</div>
+            <div className="mt-1 text-xs text-zinc-500">Cada paso exige owner + descripción.</div>
+          </div>
+          <Btn onClick={addStep}>+ Añadir paso</Btn>
+        </div>
+
+        <div className="mt-3 grid gap-2">
+          {steps.map((s, idx) => (
+            <div key={s.id} className="rounded-2xl border border-zinc-200 bg-zinc-50 p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="text-xs font-semibold text-zinc-800">Paso {idx + 1}</div>
+                <Badge tone="violet">Owner obligatorio</Badge>
+              </div>
+              <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                <TextInput value={s.role} onChange={(v) => patchStep(s.id, { role: v })} placeholder="Cargo" />
+                <TextInput value={s.name} onChange={(v) => patchStep(s.id, { name: v })} placeholder="Nombre y apellidos" />
+                <TextInput value={s.email} onChange={(v) => patchStep(s.id, { email: v })} placeholder="Email" />
+                <TextInput value={s.phone} onChange={(v) => patchStep(s.id, { phone: v })} placeholder="Móvil" />
+              </div>
+              <div className="mt-2">
+                <Textarea value={s.desc} onChange={(v) => patchStep(s.id, { desc: v })} placeholder="Descripción de lo que tiene que hacer" h="h-24" />
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+          Demo: en producción, cada paso crea tareas y notificaciones (Teams/Email) con SLA.
+        </div>
+      </div>
+
+      <div className="flex items-center justify-end gap-2">
+        <Btn onClick={onClose}>Cancelar</Btn>
+        <Btn primary onClick={onClose}>Guardar workflow (demo)</Btn>
+      </div>
+    </div>
+  );
+}
+
+// ---------- App ----------
+export default function App() {
+  const [selectedId, setSelectedId] = useState("#231");
+  const [cases, setCases] = useState(DEMO_CASES);
+  const [wfOpen, setWfOpen] = useState(false);
+
+  // Workflow state (editable) — se muestra en modal
+  const [wfState, setWfState] = useState({
+    wfName: "Caso #231 — Rotura centro crítico",
+    wfSev: "Crítico (rojo)",
+    wfTrigP: "0,70",
+    wfTrigEur: "15000",
+    wfWindow: "10",
+    wfOwner: { role: "HR Operaciones", name: "María Gómez", email: "maria.gomez@empresa.com", phone: "+34 600 123 456" },
+    wfDesc: "Mantener mínimo operativo ante pico de absentismo. Tareas con responsables + deadlines.",
+    steps: [
+      {
+        id: "s1",
+        role: "Jefe centro Sevilla",
+        name: "Luis Herrera",
+        email: "luis.herrera@empresa.com",
+        phone: "+34 611 222 333",
+        desc: "Confirmar mínimo operativo del turno y reportar gaps de cobertura.",
+      },
+      {
+        id: "s2",
+        role: "HR Operaciones",
+        name: "María Gómez",
+        email: "maria.gomez@empresa.com",
+        phone: "+34 600 123 456",
+        desc: "Activar bolsa interna hoy y validar disponibilidad real.",
+      },
+      {
+        id: "s3",
+        role: "Planificación",
+        name: "Andrea Ruiz",
+        email: "andrea.ruiz@empresa.com",
+        phone: "+34 622 444 555",
+        desc: "Generar 2 alternativas de turnos y enviar recomendación.",
+      },
+    ],
+  });
+
+  const selected = useMemo(() => cases.find((c) => c.id === selectedId) || cases[0], [cases, selectedId]);
+
+  const toggleTask = (caseId, taskId) => {
+    setCases((prev) =>
+      prev.map((c) => {
+        if (c.id !== caseId) return c;
+        return { ...c, tasks: c.tasks.map((t) => (t.id === taskId ? { ...t, done: !t.done } : t)) };
+      })
+    );
+  };
+
+  return (
+    <div className="min-h-screen bg-zinc-50">
+      <div className="sticky top-0 z-10 border-b border-zinc-200 bg-white/80 backdrop-blur">
+        <div className="mx-auto flex max-w-7xl items-center justify-between gap-3 px-4 py-3">
+          <div>
+            <div className="text-sm font-semibold text-zinc-900">Módulo 4 · Workflows (demo)</div>
+            <div className="text-xs text-zinc-500">Click en un caso ? detalle con tareas (checks). Crear workflow abre modal.</div>
+          </div>
+          <div className="flex items-center gap-2">
+            <Btn onClick={() => setWfOpen(true)}>+ Crear workflow</Btn>
+            <Badge tone="violet">Funcional (mínima)</Badge>
+          </div>
+        </div>
+      </div>
+
+      <div className="mx-auto grid max-w-7xl grid-cols-1 gap-4 px-4 pb-10 pt-4 lg:grid-cols-12">
+        {/* MAIN */}
+        <div className="lg:col-span-8 space-y-4">
+          <Card
+            title="?? Workflows activos (de un vistazo)"
+            right={
+              <div className="flex items-center gap-2">
+                <Btn onClick={() => setWfOpen(true)}>Crear</Btn>
+                <Badge tone="violet">Solo crítico/importante</Badge>
+              </div>
+            }
+          >
+            <div className="grid gap-3">
+              {cases.map((c) => (
+                <button
+                  key={c.id}
+                  type="button"
+                  onClick={() => setSelectedId(c.id)}
+                  className={
+                    "w-full rounded-[22px] border p-4 text-left shadow-sm transition " +
+                    (selectedId === c.id ? "border-violet-300 bg-violet-50" : "border-zinc-200 bg-white hover:bg-zinc-50")
+                  }
+                >
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Badge tone={sevTone(c.sev)}>{sevLabel(c.sev)}</Badge>
+                        <div className="truncate text-sm font-semibold text-zinc-900">{c.title}</div>
+                      </div>
+                      <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-5">
+                        <Stat label="Prob. rotura" value={c.metrics.prob} tone={sevTone(c.sev)} />
+                        <Stat label="Con workflow" value={c.metrics.after} tone={sevTone(c.sev)} />
+                        <Stat label="Red. P&L" value={c.metrics.pnl} tone="violet" />
+                        <Stat label="ROI" value={c.metrics.roi} tone={c.metrics.roi.startsWith("2") ? "green" : "amber"} />
+                        <Stat label="% ejecución" value={c.metrics.exec} tone="violet" />
+                      </div>
+                      <div className="mt-3 rounded-2xl border border-zinc-200 bg-white p-3">
+                        <div className="text-xs font-semibold text-zinc-800">Próxima tarea</div>
+                        <div className="mt-1 text-xs text-zinc-600">{c.next}</div>
+                      </div>
+                    </div>
+                    <div className="shrink-0"><Badge>{selectedId === c.id ? "Seleccionado" : "Ver detalle"}</Badge></div>
+                  </div>
+                </button>
+              ))}
+            </div>
+          </Card>
+
+          <Card title={`?? Detalle — ${selected.id}`} right={<Badge tone={sevTone(selected.sev)}>{sevLabel(selected.sev)}</Badge>}>
+            <div className="grid gap-4 lg:grid-cols-3">
+              {/* left */}
+              <div className="lg:col-span-2 space-y-4">
+                <div className="rounded-[22px] border border-zinc-200 bg-white p-4 shadow-sm">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge tone={sevTone(selected.sev)}>{selected.title}</Badge>
+                    <Badge>{selected.unit}</Badge>
+                    <Badge>Deadline: {selected.deadline}</Badge>
+                  </div>
+                  <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
+                    <Stat label="Prob. rotura" value={selected.metrics.prob} tone={sevTone(selected.sev)} />
+                    <Stat label="Con workflow" value={selected.metrics.after} tone={sevTone(selected.sev)} />
+                    <Stat label="Red. P&L" value={selected.metrics.pnl} tone="violet" />
+                    <Stat label="ROI" value={selected.metrics.roi} tone={selected.metrics.roi.startsWith("2") ? "green" : "amber"} />
+                  </div>
+                </div>
+
+                <div className="rounded-[22px] border border-zinc-200 bg-white p-4 shadow-sm">
+                  <div className="flex items-center justify-between gap-2">
+                    <div>
+                      <div className="text-sm font-semibold text-zinc-900">Tareas automáticas + responsables</div>
+                      <div className="mt-1 text-xs text-zinc-500">Click en una tarea para marcar hecha / pendiente (demo).</div>
+                    </div>
+                    <Badge tone="violet">% ejecución {selected.metrics.exec}</Badge>
+                  </div>
+
+                  <div className="mt-3 grid gap-2">
+                    {selected.tasks.map((t) => (
+                      <button
+                        key={t.id}
+                        type="button"
+                        onClick={() => toggleTask(selected.id, t.id)}
+                        className={
+                          "w-full rounded-2xl border p-3 text-left transition " +
+                          (t.done ? "border-emerald-200 bg-emerald-50" : "border-zinc-200 bg-zinc-50 hover:bg-white")
+                        }
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="text-xs font-semibold text-zinc-800">{t.area}</div>
+                          <div className="flex items-center gap-2">
+                            <Badge>{t.due}</Badge>
+                            {t.done ? <Badge tone="green">? Hecho</Badge> : <Badge tone="amber">Pendiente</Badge>}
+                          </div>
+                        </div>
+                        <div className={"mt-1 text-sm font-semibold " + (t.done ? "text-emerald-900" : "text-zinc-900")}>{t.what}</div>
+                        <div className="mt-1 text-xs text-zinc-600">Owner: {t.who}</div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {/* right */}
+              <div className="space-y-4">
+                <div className="rounded-[22px] border border-zinc-200 bg-white p-4 shadow-sm">
+                  <div className="text-sm font-semibold text-zinc-900">Resumen ejecutivo</div>
+                  <div className="mt-3 space-y-3">
+                    <Row k="Abrimos caso" v={selected.id} />
+                    <Row k="Prioridad" v={<Badge tone={sevTone(selected.sev)}>{selected.priority}</Badge>} />
+                    <Row k="Responsables" v={selected.responsibles} />
+                    <Row k="Objetivo" v={selected.objective} />
+                  </div>
+                </div>
+
+                <div className="rounded-[22px] border border-violet-200 bg-violet-50 p-4">
+                  <div className="text-sm font-semibold text-violet-900">Lo importante</div>
+                  <div className="mt-2 text-sm text-violet-900">Una alerta sin tareas no cambia nada. Aquí hay dueños, deadlines y seguimiento.</div>
+                </div>
+              </div>
+            </div>
+          </Card>
+        </div>
+
+        {/* SIDEBAR */}
+        <div className="lg:col-span-4">
+          <div className="rounded-[24px] border border-zinc-200 bg-white shadow-sm">
+            <div className="flex items-center justify-between gap-3 p-4">
+              <div>
+                <div className="text-sm font-semibold text-zinc-900">?? Copiloto IA</div>
+                <div className="text-xs text-zinc-500">Siempre visible (demo)</div>
+              </div>
+              <Badge tone="violet">Mock</Badge>
+            </div>
+            <div className="h-px w-full bg-zinc-100" />
+            <div className="space-y-3 p-4">
+              <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-3">
+                <div className="text-xs font-semibold text-zinc-800">Preguntas típicas</div>
+                <ul className="mt-2 space-y-1 text-sm text-zinc-700">
+                  <li>• “¿Qué centros tienen mayor riesgo hoy?”</li>
+                  <li>• “Explícame este caso para el CEO”</li>
+                  <li>• “3 acciones para reducir en 30 días”</li>
+                </ul>
+              </div>
+              <div className="rounded-2xl border border-violet-200 bg-violet-50 p-3">
+                <div className="text-xs font-semibold text-violet-900">Respuesta (mock)</div>
+                <div className="mt-2 text-sm text-violet-900">
+                  Prioriza el caso seleccionado: alta probabilidad y alto impacto. Ejecuta primero las tareas de HOY y bloquea la rotura.
+                </div>
+              </div>
+              <div className="text-[11px] text-zinc-500">Sin datos clínicos. Drivers operativos (turnos, carga, vacantes, fricción).</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <Modal
+        open={wfOpen}
+        onClose={() => setWfOpen(false)}
+        title="?? Crear workflow"
+        subtitle="Pantalla aparte (modal). Owner principal + pasos. Demo editable."
+      >
+        <WorkflowBuilder state={wfState} setState={setWfState} onClose={() => setWfOpen(false)} />
+      </Modal>
+    </div>
+  );
+}

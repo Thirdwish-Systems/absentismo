@@ -1,0 +1,794 @@
+import React, { useMemo, useRef, useState } from "react";
+import { ArrowUp, Brain, RefreshCw, Search, Sparkles } from "lucide-react";
+
+/**
+ * MÓDULO PREDICTIVO 3.1 — VISUAL
+ * “Mapa” de toda la compañía por día:
+ * - Verde: sin riesgo (rotura < 40%)
+ * - Amarillo: riesgo medio (40–69%)
+ * - Rojo: riesgo alto (= 70%)
+ *
+ * Rotura = quedarse por debajo del mínimo operativo en un día/turno/rol.
+ * (Demo: datos simulados; en real vendrá de tu motor + datos.)
+ */
+
+const DAY = 24 * 60 * 60 * 1000;
+const SHIFTS = ["Mañana", "Tarde", "Noche"] as const;
+const ROLES = ["Caja", "Reposición", "Picking", "Atención", "Producción"] as const;
+
+type Shift = (typeof SHIFTS)[number];
+type Role = (typeof ROLES)[number];
+
+type Store = {
+  id: string;
+  name: string;
+  region: string;
+  size: number;
+  criticidad: "Alta" | "Media" | "Baja";
+  x: number; // 0..100
+  y: number; // 0..100
+};
+
+type Driver = { label: string; s: number; why: string };
+
+type Cell = {
+  key: string;
+  storeId: string;
+  storeName: string;
+  region: string;
+  criticidad: Store["criticidad"];
+  dayTs: number;
+  shift: Shift;
+  role: Role;
+  planned: number;
+  minOp: number;
+  riskAbs: number; // %
+  riskBreak: number; // %
+  absType: string;
+  durDays: number;
+  eur: number;
+  eurNP: number;
+  pattern: string;
+  why: string;
+  drivers: Driver[];
+};
+
+type Agg = {
+  storeId: string;
+  storeName: string;
+  region: string;
+  criticidad: Store["criticidad"];
+  x: number;
+  y: number;
+  worst: Cell;
+};
+
+type Plan = { name: string; owner: string; deadline: string; riskDown: number; cost: number; net: number; roi: number; desc: string };
+
+type Msg = { id: string; role: "user" | "assistant"; text: string };
+
+/* ---------------- helpers ---------------- */
+
+const cn = (...xs: Array<string | false | null | undefined>) => xs.filter(Boolean).join(" ");
+const clamp = (n: number, a: number, b: number) => Math.min(b, Math.max(a, n));
+const pct = (n: number) => `${Math.round(clamp(n, 0, 100))}%`;
+const iso = (d: number) => new Date(d).toISOString().slice(0, 10);
+const ddmm = (d: number) => new Intl.DateTimeFormat("es-ES", { day: "2-digit", month: "2-digit" }).format(new Date(d));
+const dow = (d: number) => ["Dom", "Lun", "Mar", "Mié", "Jue", "Vie", "Sáb"][new Date(d).getDay()];
+const money = (n: number) =>
+  new Intl.NumberFormat("es-ES", { style: "currency", currency: "EUR", maximumFractionDigits: 0 }).format(
+    Number.isFinite(n) ? n : 0
+  );
+
+function startOfToday() {
+  const t = new Date();
+  return new Date(t.getFullYear(), t.getMonth(), t.getDate()).getTime();
+}
+
+function mkId() {
+  return `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+}
+
+function hashStr(s: string) {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
+function rand01(seed: string) {
+  return (hashStr(seed) % 10000) / 10000;
+}
+
+function tone(r: number) {
+  const x = clamp(r, 0, 100);
+  if (x >= 70) return { k: "alto", label: "Alto", dot: "bg-rose-600", ring: "ring-rose-300", chip: "bg-rose-50 text-rose-950 border-rose-200" };
+  if (x >= 40) return { k: "medio", label: "Medio", dot: "bg-amber-500", ring: "ring-amber-200", chip: "bg-amber-50 text-amber-950 border-amber-200" };
+  return { k: "bajo", label: "Bajo", dot: "bg-emerald-500", ring: "ring-emerald-200", chip: "bg-emerald-50 text-emerald-950 border-emerald-200" };
+}
+
+function Pill({ cls, children, title }: { cls: string; children: React.ReactNode; title?: string }) {
+  return (
+    <span title={title} className={cn("inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs font-semibold", cls)}>
+      {children}
+    </span>
+  );
+}
+
+function Btn({ onClick, children, tone = "zinc" }: { onClick?: () => void; children: React.ReactNode; tone?: "zinc" | "violet" }) {
+  const base = "inline-flex items-center gap-2 rounded-full border px-3 py-2 text-xs font-semibold shadow-sm transition focus:outline-none focus:ring-2 focus:ring-violet-300";
+  const cls = tone === "violet" ? "border-violet-200 bg-violet-50 text-violet-900 hover:bg-violet-100" : "border-zinc-200 bg-white text-zinc-900 hover:bg-zinc-50";
+  return (
+    <button type="button" onClick={onClick} className={cn(base, cls)}>
+      {children}
+    </button>
+  );
+}
+
+function Card({ title, desc, right, children }: { title: string; desc?: string; right?: React.ReactNode; children: React.ReactNode }) {
+  return (
+    <div className="rounded-[28px] border border-zinc-200 bg-white shadow-sm">
+      <div className="flex items-start justify-between gap-3 p-5">
+        <div>
+          <div className="text-sm font-semibold text-zinc-900">{title}</div>
+          {desc ? <div className="mt-1 text-xs text-zinc-500">{desc}</div> : null}
+        </div>
+        {right}
+      </div>
+      <div className="h-px w-full bg-zinc-100" />
+      <div className="p-5">{children}</div>
+    </div>
+  );
+}
+
+function Stat({ label, value, hint }: { label: string; value: string; hint?: string }) {
+  return (
+    <div className="rounded-2xl border border-zinc-200 bg-white p-3">
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-[11px] font-semibold text-zinc-600">{label}</div>
+        {hint ? <div className="text-[11px] text-zinc-400" title={hint}>??</div> : null}
+      </div>
+      <div className="mt-1 text-sm font-semibold text-zinc-900">{value}</div>
+    </div>
+  );
+}
+
+/* ---------------- demo stores ---------------- */
+
+function genStores(n = 110): Store[] {
+  const regions = ["Noroeste", "Noreste", "Centro", "Levante", "Sur"];
+  const out: Store[] = [];
+  for (let i = 0; i < n; i++) {
+    const seed = `store|${i}`;
+    const r = regions[Math.floor(rand01(seed + "|r") * regions.length)] || "Centro";
+    const size = Math.round(18 + rand01(seed + "|s") * 120);
+    const criticidad: Store["criticidad"] = size > 95 ? "Alta" : size > 55 ? "Media" : "Baja";
+
+    // “Mapa” visual: distribuimos por regiones (sin geocodificación)
+    const base =
+      r === "Noroeste" ? { x: 22, y: 28 } :
+      r === "Noreste" ? { x: 70, y: 25 } :
+      r === "Centro" ? { x: 48, y: 50 } :
+      r === "Levante" ? { x: 75, y: 55 } :
+      { x: 45, y: 78 };
+
+    const x = clamp(base.x + (rand01(seed + "|x") - 0.5) * 18, 6, 94);
+    const y = clamp(base.y + (rand01(seed + "|y") - 0.5) * 16, 6, 94);
+
+    out.push({
+      id: `T-${String(i + 1).padStart(3, "0")}`,
+      name: `Tienda ${String(i + 1).padStart(3, "0")}`,
+      region: r,
+      size,
+      criticidad,
+      x,
+      y,
+    });
+  }
+  return out;
+}
+
+/* ---------------- motor demo ---------------- */
+
+function keyOf(storeId: string, dayTs: number, shift: Shift, role: Role) {
+  return `${storeId}__${iso(dayTs)}__${shift}__${role}`;
+}
+
+function calcCell(store: Store, dayTs: number, shift: Shift, role: Role, cal: number): Cell {
+  const seed = `${store.id}|${dayTs}|${shift}|${role}`;
+  const wDay = new Date(dayTs).getDay();
+  const dayIdx = Math.floor((dayTs - startOfToday()) / DAY);
+
+  const shiftW = shift === "Noche" ? 0.9 : shift === "Mañana" ? 1.05 : 1;
+  const roleW = role === "Producción" ? 1.2 : role === "Picking" ? 1.1 : role === "Caja" ? 0.92 : 1;
+  const base = store.size / (SHIFTS.length * 2.1);
+  const planned = Math.max(2, Math.round(base * shiftW * roleW + rand01(seed + "|hc") * 2));
+  const minOp = Math.max(1, Math.round(planned * 0.85));
+
+  const fat = clamp(0.2 + 0.7 * rand01(seed + "|fat") + (shift === "Noche" ? 0.08 : 0), 0, 1);
+  const chg = clamp(0.15 + 0.75 * rand01(seed + "|chg") + (shift === "Tarde" ? 0.05 : 0), 0, 1);
+  const cons = clamp(0.2 + 0.7 * rand01(seed + "|cons") + (shift === "Noche" ? 0.08 : 0), 0, 1);
+  const cx = clamp(0.2 + 0.7 * rand01(store.id + "|cx"), 0, 1);
+  const rot = clamp(0.08 + 0.28 * rand01(store.id + "|rot"), 0, 1);
+
+  // externas (demo)
+  const heat = dayIdx >= 6 && dayIdx <= 9 ? 0.18 : 0;
+  const camp = dayIdx >= 7 && dayIdx <= 11 && (wDay === 4 || wDay === 5) ? 0.18 : 0;
+  const recurrent = (role === "Caja" && wDay === 5 ? 0.12 : 0) + (store.region === "Sur" && role === "Picking" && wDay === 1 ? 0.16 : 0);
+  const ext = clamp(heat + camp + recurrent, 0, 0.6);
+
+  const riskAbs = clamp((0.14 + 0.35 * fat + 0.2 * chg + 0.22 * ext + 0.15 * rot) * 100, 5, 95);
+
+  const absentExp = clamp(planned * (0.03 + 0.04 * fat + 0.02 * ext + 0.012 * chg), 0, Math.max(0, planned - 0.5));
+  const presentExp = planned - absentExp;
+  const gap = Math.max(0, (minOp - presentExp) / Math.max(1, minOp));
+  const riskBreak = clamp((gap * 120 + riskAbs * 0.25 + cx * 14) * (1 + cal), 0, 100);
+
+  const absType = ext > 0.28 ? "Ausencia no planificada" : fat > 0.6 ? "Baja (IT) corta" : "Permiso puntual";
+  const durDays = clamp(1.1 + (absType === "Baja (IT) corta" ? 2.7 : 1.1) + ext * 1.2, 1, 6);
+
+  const costPerDay = 220;
+  const baseCost = absentExp * costPerDay;
+  const urgent = riskBreak >= 70 ? 1.25 : 1;
+  const sub = baseCost * 0.55 * urgent * (1 + fat * 0.25);
+  const hidden = (riskBreak / 100) * absentExp * 140;
+  const eur = baseCost + sub + hidden;
+  const eurNP = Math.max(0, eur - baseCost);
+
+  let pattern = "Mixto";
+  let why = "Riesgo moderado; decide por impacto y rapidez.";
+  if (ext >= 0.35) {
+    pattern = `Pico externo (${dow(dayTs)})`;
+    why = "Factores externos elevan el riesgo en una fecha concreta.";
+  } else if (fat >= 0.62 && cons >= 0.62) {
+    pattern = "Espiral de fatiga";
+    why = "Fatiga + turnos seguidos ? bola de nieve.";
+  } else if (planned <= 3) {
+    pattern = "Mínimo crítico";
+    why = "Vas justo: una ausencia te deja por debajo del mínimo.";
+  } else if (chg >= 0.62) {
+    pattern = "Fricción por cambios";
+    why = "Cambios elevan urgencias y coste fuera de presupuesto.";
+  } else if (cx >= 0.66 && rot >= 0.2) {
+    pattern = "Fragilidad estructural";
+    why = "Mismo % puede costar más por complejidad.";
+  }
+
+  const drivers: Driver[] = [
+    { label: "Fatiga", s: fat, why: "Horas extra/descanso ? suben ausencias." },
+    { label: "Turnos seguidos", s: cons, why: "Bloques sin descanso ? aumenta el pico." },
+    { label: "Cambios de turno", s: chg, why: "Variabilidad ? más urgencia y coste." },
+    { label: "Factores externos", s: ext, why: "Clima/campañas/eventos ? amplifican." },
+    { label: "Rotación", s: rot, why: "Vacantes crónicas ? más carga." },
+    { label: "Complejidad", s: cx, why: "SLA/rigidez ? fragilidad." },
+  ];
+
+  return {
+    key: keyOf(store.id, dayTs, shift, role),
+    storeId: store.id,
+    storeName: store.name,
+    region: store.region,
+    criticidad: store.criticidad,
+    dayTs,
+    shift,
+    role,
+    planned,
+    minOp,
+    riskAbs,
+    riskBreak,
+    absType,
+    durDays,
+    eur,
+    eurNP,
+    pattern,
+    why,
+    drivers,
+  };
+}
+
+function plansFor(cell: Cell): Plan[] {
+  const base = cell.eur;
+  const br = cell.riskBreak;
+  const critW = cell.criticidad === "Alta" ? 1.1 : cell.criticidad === "Media" ? 1.0 : 0.9;
+
+  const defs = [
+    { name: "Refuerzo preventivo", desc: "Bolsa/ETT con antelación.", owner: "RRHH + Operaciones", deadline: "48h", costF: 0.22, brF: 0.45, min: 10, max: 55 },
+    { name: "Mover cobertura", desc: "Reequilibrar desde tienda cercana.", owner: "Operaciones", deadline: "24–48h", costF: 0.12, brF: 0.3, min: 8, max: 40 },
+    { name: "Ajuste de turnos", desc: "Reducir cambios/turnos seguidos.", owner: "Planificación", deadline: "72h", costF: 0.05, brF: 0.18, min: 5, max: 28 },
+  ];
+
+  return defs
+    .map((d) => {
+      const cost = base * d.costF;
+      const riskDown = clamp(br * d.brF * critW, d.min, d.max);
+      const newEur = base * (1 - (riskDown / 100) * 0.55);
+      const savings = Math.max(0, base - newEur);
+      const net = Math.max(0, savings - cost);
+      const roi = cost ? Math.round(((savings - cost) / cost) * 100) : 0;
+      return { name: d.name, desc: d.desc, owner: d.owner, deadline: d.deadline, riskDown, cost, net, roi };
+    })
+    .sort((a, b) => b.net - a.net || b.riskDown - a.riskDown);
+}
+
+function bestCellForDay(store: Store, dayTs: number, cal: number): Cell {
+  let best: Cell | null = null;
+  for (const s of SHIFTS) {
+    for (const r of ROLES) {
+      const c = calcCell(store, dayTs, s, r, cal);
+      if (!best || c.riskBreak > best.riskBreak || (c.riskBreak === best.riskBreak && c.eurNP > best.eurNP)) best = c;
+    }
+  }
+  return best as Cell;
+}
+
+function copilotReply(q: string, ctx: { day: number; acc: number; sel: Agg; top: Agg[]; counts: { g: number; y: number; r: number }; np: number }) {
+  const t = String(q || "").toLowerCase();
+  const { day, acc, sel, top, counts, np } = ctx;
+
+  const header = [
+    `Día: ${dow(day)} ${iso(day)} · Precisión orientativa: ${pct(acc)}`,
+    `Empresa: ${counts.r} altas · ${counts.y} medias · ${counts.g} sin riesgo`,
+    `Fuera de presupuesto estimado (día): ${money(np)}`,
+  ].join("\n");
+
+  if (t.includes("dónde") || t.includes("donde") || t.includes("mayor") || t.includes("prior")) {
+    const lines = top.slice(0, 6).map((a, i) => {
+      const c = a.worst;
+      return `${i + 1}) ${a.storeName} (${a.region}) · rotura ${pct(c.riskBreak)} · ${c.shift}/${c.role} · fuera de presupuesto ${money(c.eurNP)}`;
+    });
+    return [header, "", "Top riesgos del día:", "", ...lines].join("\n");
+  }
+
+  if (t.includes("tienda") || t.includes("selección") || t.includes("seleccion") || t.includes("detall")) {
+    const c = sel.worst;
+    const plans = plansFor(c).slice(0, 2).map((p, i) => {
+      const after = clamp(c.riskBreak - p.riskDown, 0, 100);
+      const x = p.cost ? (p.net + p.cost) / p.cost : 0;
+      const xTxt = p.cost ? `${new Intl.NumberFormat("es-ES", { minimumFractionDigits: 1, maximumFractionDigits: 1 }).format(x)}x` : "—";
+      return `${i + 1}) ${p.name} · riesgo ${pct(c.riskBreak)} ? ${pct(after)} · ahorro neto ${money(p.net)} · ${xTxt} · ${p.deadline}`;
+    });
+    return [
+      header,
+      "",
+      `Selección: ${sel.storeName} (${sel.region})`,
+      `Rotura: ${pct(c.riskBreak)} · Bajas: ${pct(c.riskAbs)} · Coste: ${money(c.eur)} (fuera de presupuesto ${money(c.eurNP)})`,
+      `Patrón: ${c.pattern} — ${c.why}`,
+      "",
+      "Acciones recomendadas:",
+      ...plans,
+    ].join("\n");
+  }
+
+  if (t.includes("por qué") || t.includes("porque") || t.includes("causa")) {
+    const c = sel.worst;
+    const ds = c.drivers.slice().sort((a, b) => b.s - a.s).slice(0, 4).map((d) => `• ${d.label}: ${pct(d.s * 100)} — ${d.why}`);
+    return [header, "", `Selección: ${sel.storeName}`, `Patrón: ${c.pattern}`, `${c.why}`, "", ...ds].join("\n");
+  }
+
+  return [
+    header,
+    "",
+    "Pídeme:",
+    "• 'dónde está el mayor riesgo'",
+    "• 'detalle de la tienda seleccionada'",
+    "• 'por qué'",
+  ].join("\n");
+}
+
+/* ---------------- UI ---------------- */
+
+export default function Modulo31Visual() {
+  const stores = useMemo(() => genStores(115), []);
+
+  // Día seleccionado (calendario)
+  const [dayISO, setDayISO] = useState<string>(iso(startOfToday()));
+  const dayTs = useMemo(() => {
+    const [y, m, d] = dayISO.split("-").map((x) => Number(x));
+    return new Date(y, (m || 1) - 1, d || 1).getTime();
+  }, [dayISO]);
+
+  // búsqueda
+  const [q, setQ] = useState("");
+  const [showLabels, setShowLabels] = useState(false);
+
+  // calibración por tienda (demo)
+  const [cal, setCal] = useState<Record<string, number>>({});
+  const samples = useMemo(() => Object.keys(cal).length, [cal]);
+  const acc = useMemo(() => clamp(90 - Math.min(30, Math.floor((Math.abs(dayTs - startOfToday()) / DAY) * 1.2)) + Math.min(8, samples), 40, 92), [dayTs, samples]);
+
+  const aggs = useMemo(() => {
+    const out: Agg[] = [];
+    for (const s of stores) {
+      const c = bestCellForDay(s, dayTs, cal[s.id] || 0);
+      out.push({ storeId: s.id, storeName: s.name, region: s.region, criticidad: s.criticidad, x: s.x, y: s.y, worst: c });
+    }
+    // demo: asegura algunos rojos/amarillos
+    const sorted = out.slice().sort((a, b) => b.worst.riskBreak - a.worst.riskBreak);
+    for (let i = 0; i < Math.min(3, sorted.length); i++) sorted[i].worst.riskBreak = clamp(sorted[i].worst.riskBreak + 18, 70, 95);
+    for (let i = 3; i < Math.min(6, sorted.length); i++) sorted[i].worst.riskBreak = clamp(sorted[i].worst.riskBreak + 10, 40, 69);
+    return out;
+  }, [stores, dayTs, cal]);
+
+  const counts = useMemo(() => {
+    let g = 0, y = 0, r = 0;
+    for (const a of aggs) {
+      const rb = a.worst.riskBreak;
+      if (rb >= 70) r++;
+      else if (rb >= 40) y++;
+      else g++;
+    }
+    return { g, y, r };
+  }, [aggs]);
+
+  const npDay = useMemo(() => aggs.reduce((sum, a) => sum + a.worst.eurNP, 0), [aggs]);
+
+  const filtered = useMemo(() => {
+    const qq = q.trim().toLowerCase();
+    if (!qq) return aggs;
+    return aggs.filter((a) => [a.storeName, a.storeId, a.region].join(" ").toLowerCase().includes(qq));
+  }, [aggs, q]);
+
+  const top = useMemo(() => aggs.slice().sort((a, b) => b.worst.riskBreak - a.worst.riskBreak || b.worst.eurNP - a.worst.eurNP).slice(0, 8), [aggs]);
+
+  const [selId, setSelId] = useState<string>(stores[0]?.id || "");
+  const sel = useMemo(() => aggs.find((a) => a.storeId === selId) || aggs[0], [aggs, selId]);
+  const selTone = tone(sel.worst.riskBreak);
+  const bestPlan = useMemo(() => plansFor(sel.worst)[0], [sel]);
+
+  // UX: hacer que la acción se entienda sin explicar nada
+  const afterBreak = useMemo(() => clamp(sel.worst.riskBreak - bestPlan.riskDown, 0, 100), [sel, bestPlan]);
+  const recXText = useMemo(() => {
+    if (!bestPlan.cost) return "—";
+    const x = (bestPlan.net + bestPlan.cost) / bestPlan.cost; // ahorro/coste
+    return `${new Intl.NumberFormat("es-ES", { minimumFractionDigits: 1, maximumFractionDigits: 1 }).format(x)}x`;
+  }, [bestPlan]);
+
+  // copiloto
+  const [msgs, setMsgs] = useState<Msg[]>([
+    { id: mkId(), role: "assistant", text: "Soy tu Copiloto. Prueba: 'dónde está el mayor riesgo', 'detalle de la tienda seleccionada', 'por qué'." },
+  ]);
+  const [draft, setDraft] = useState("");
+  const endRef = useRef<HTMLDivElement | null>(null);
+
+  function push(role: Msg["role"], text: string) {
+    setMsgs((p) => [...p, { id: mkId(), role, text }]);
+    setTimeout(() => endRef.current?.scrollIntoView({ behavior: "smooth" }), 30);
+  }
+
+  function send(text?: string) {
+    const qq = (text ?? draft).trim();
+    if (!qq) return;
+    setDraft("");
+    push("user", qq);
+    push("assistant", copilotReply(qq, { day: dayTs, acc, sel, top, counts, np: npDay }));
+  }
+
+  function reset() {
+    setQ("");
+    setShowLabels(false);
+    setMsgs((p) => p.slice(0, 1));
+  }
+
+  function learn() {
+    // demo: aprende algo sobre la tienda seleccionada
+    const pred = clamp(sel.worst.riskBreak / 100, 0, 1);
+    const actual = rand01(sel.storeId + "|" + dayISO + "|real") < pred * 0.92;
+    setCal((p) => {
+      const act = actual ? 1 : 0;
+      const next = clamp((p[sel.storeId] || 0) + 0.1 * (act - pred), -0.25, 0.25);
+      return { ...p, [sel.storeId]: next };
+    });
+  }
+
+  return (
+    <div className="min-h-screen bg-zinc-50">
+      <div className="mx-auto max-w-[1600px] px-4 py-6">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Pill cls="border-violet-200 bg-violet-50 text-violet-900"><Sparkles className="h-4 w-4" />Módulo 3.1 visual</Pill>
+              <Pill cls="border-zinc-200 bg-white text-zinc-800" title="Rotura = bajar del mínimo operativo (día/turno/rol).">rotura</Pill>
+              <Pill cls="border-zinc-200 bg-white text-zinc-800" title="Verde <40%, Amarillo 40–69%, Rojo =70%.">colores por riesgo</Pill>
+            </div>
+            <h1 className="mt-3 text-2xl font-semibold tracking-tight text-zinc-900">Mapa de riesgo de rotura (toda la compañía)</h1>
+            <p className="mt-1 max-w-3xl text-sm text-zinc-600">
+              Elige un día arriba y verás toda la empresa como un mapa: dónde está estable y dónde puede romper.
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="rounded-full border border-zinc-200 bg-white px-3 py-2 text-xs font-semibold text-zinc-700">
+              Día: <input value={dayISO} onChange={(e) => setDayISO(e.target.value)} type="date" className="ml-2 rounded-md border border-zinc-200 px-2 py-1 text-xs font-semibold text-zinc-900 outline-none focus:ring-2 focus:ring-violet-300" />
+            </div>
+            <Pill cls="border-zinc-200 bg-white text-zinc-800" title="Como la previsión del tiempo: cuanto más lejos, menos fiable.">Precisión {pct(acc)}</Pill>
+            <Btn onClick={reset}><RefreshCw className="h-4 w-4" />Reset</Btn>
+          </div>
+        </div>
+
+        <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-12">
+          {/* MAPA */}
+          <div className="lg:col-span-8 space-y-4">
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
+              <Stat label="Tiendas en rojo" value={String(counts.r)} hint="Riesgo alto: probabilidad de rotura = 70%." />
+              <Stat label="Tiendas en amarillo" value={String(counts.y)} hint="Riesgo medio: probabilidad de rotura 40–69%." />
+              <Stat label="Tiendas en verde" value={String(counts.g)} hint="Sin riesgo relevante: probabilidad de rotura < 40%." />
+              <Stat label="Fuera de presupuesto (día)" value={money(npDay)} hint="Sobrecoste estimado por urgencia/sustitución." />
+            </div>
+
+            <Card
+              title="Mapa visual de la compañía"
+              desc="Haz clic en cualquier tienda. Verde=estable · Amarillo=vigilar · Rojo=riesgo alto."
+              right={
+                <div className="flex flex-wrap items-center gap-2">
+                  <label className="relative">
+                    <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-zinc-400" />
+                    <input
+                      value={q}
+                      onChange={(e) => setQ(e.target.value)}
+                      placeholder="Buscar tienda o región..."
+                      className="w-[260px] rounded-full border border-zinc-200 bg-white py-2 pl-9 pr-3 text-xs font-semibold text-zinc-900 outline-none focus:ring-2 focus:ring-violet-300"
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => setShowLabels((v) => !v)}
+                    className={cn(
+                      "rounded-full border px-3 py-2 text-xs font-semibold",
+                      showLabels ? "border-violet-200 bg-violet-50 text-violet-900" : "border-zinc-200 bg-white text-zinc-700"
+                    )}
+                    title="Muestra/oculta etiquetas en el mapa."
+                  >
+                    Etiquetas
+                  </button>
+                </div>
+              }
+            >
+              <div
+                className="relative w-full overflow-hidden rounded-3xl border border-zinc-200"
+                style={{
+                  height: "min(68vh, 640px)",
+                  backgroundImage:
+                    "linear-gradient(to right, rgba(24,24,27,0.06) 1px, transparent 1px), linear-gradient(to bottom, rgba(24,24,27,0.06) 1px, transparent 1px), radial-gradient(1200px 700px at 60% 40%, rgba(124,58,237,0.10), transparent 55%), radial-gradient(900px 600px at 20% 70%, rgba(0,0,0,0.05), transparent 55%)",
+                  backgroundSize: "48px 48px, 48px 48px, auto, auto",
+                  backgroundColor: "white",
+                }}
+              >
+                {/* leyenda */}
+                <div className="absolute left-4 top-4 flex flex-wrap items-center gap-2 rounded-2xl border border-zinc-200 bg-white/90 px-3 py-2 text-xs font-semibold text-zinc-800 shadow-sm backdrop-blur">
+                  <span className="inline-flex items-center gap-2"><span className="h-2.5 w-2.5 rounded-full bg-emerald-500" /> Verde</span>
+                  <span className="inline-flex items-center gap-2"><span className="h-2.5 w-2.5 rounded-full bg-amber-500" /> Amarillo</span>
+                  <span className="inline-flex items-center gap-2"><span className="h-2.5 w-2.5 rounded-full bg-rose-600" /> Rojo</span>
+                  <span className="ml-2 text-zinc-500">(rotura: bajar del mínimo operativo)</span>
+                </div>
+
+                {/* puntos */}
+                {filtered.map((a) => {
+                  const rb = a.worst.riskBreak;
+                  const tt = tone(rb);
+                  const selected = a.storeId === sel.storeId;
+                  const dot = tt.k === "alto" ? "bg-rose-600" : tt.k === "medio" ? "bg-amber-500" : "bg-emerald-500";
+                  const halo = selected ? "ring-4 ring-violet-300" : `ring-2 ${tt.ring}`;
+                  const size = tt.k === "alto" ? "h-4 w-4" : tt.k === "medio" ? "h-3.5 w-3.5" : "h-3 w-3";
+
+                  return (
+                    <button
+                      key={a.storeId}
+                      type="button"
+                      onClick={() => setSelId(a.storeId)}
+                      className="group absolute -translate-x-1/2 -translate-y-1/2"
+                      style={{ left: `${a.x}%`, top: `${a.y}%` }}
+                      title={`${a.storeName} · ${a.region} · Rotura ${pct(rb)} · ${a.worst.shift}/${a.worst.role}`}
+                    >
+                      <span className={cn("relative block rounded-full", dot, size, "shadow-sm", halo, tt.k === "alto" ? "animate-pulse" : "")}></span>
+                      {showLabels ? (
+                        <span className={cn(
+                          "pointer-events-none absolute left-1/2 top-[-10px] -translate-x-1/2 -translate-y-full whitespace-nowrap rounded-full border bg-white px-2 py-1 text-[11px] font-semibold shadow-sm",
+                          selected ? "border-violet-200" : "border-zinc-200",
+                          "text-zinc-900"
+                        )}>
+                          {a.storeName}
+                        </span>
+                      ) : null}
+
+                      {/* mini tooltip al hover */}
+                      <span className="pointer-events-none absolute left-1/2 top-[-12px] hidden -translate-x-1/2 -translate-y-full whitespace-nowrap rounded-2xl border border-zinc-200 bg-white px-2 py-1 text-[11px] font-semibold text-zinc-900 shadow-sm group-hover:block">
+                        {a.storeName} · {pct(rb)}
+                      </span>
+                    </button>
+                  );
+                })}
+
+                {/* etiqueta regiones */}
+                <div className="absolute bottom-4 left-4 rounded-2xl border border-zinc-200 bg-white/90 px-3 py-2 text-xs font-semibold text-zinc-700 shadow-sm backdrop-blur">
+                  Regiones: Noroeste · Noreste · Centro · Levante · Sur
+                </div>
+              </div>
+            </Card>
+
+            <Card
+              title="Top riesgos del día"
+              desc="Ir al grano: las 8 tiendas que más pueden romper hoy (por probabilidad y coste)."
+            >
+              <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+                {top.map((a) => {
+                  const tt = tone(a.worst.riskBreak);
+                  const active = a.storeId === sel.storeId;
+                  return (
+                    <button
+                      key={a.storeId}
+                      type="button"
+                      onClick={() => setSelId(a.storeId)}
+                      className={cn(
+                        "rounded-2xl border p-3 text-left transition focus:outline-none focus:ring-2 focus:ring-violet-300",
+                        active ? "border-violet-300 bg-white" : "border-zinc-200 bg-white hover:bg-zinc-50"
+                      )}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <div className="text-sm font-semibold text-zinc-900">{a.storeName}</div>
+                          <div className="mt-0.5 text-xs text-zinc-500">{a.region} · {a.worst.shift}/{a.worst.role}</div>
+                        </div>
+                        <Pill cls={tt.chip} title="Probabilidad de rotura (bajar del mínimo operativo).">{tt.label} {pct(a.worst.riskBreak)}</Pill>
+                      </div>
+                      <div className="mt-2 text-xs text-amber-700">Fuera de presupuesto {money(a.worst.eurNP)}</div>
+                    </button>
+                  );
+                })}
+              </div>
+            </Card>
+          </div>
+
+          {/* PANEL DERECHA */}
+          <div className="lg:col-span-4 space-y-4">
+            <div className="sticky top-6 space-y-4">
+              <Card
+                title="Detalle de la tienda"
+                desc="La peor combinación (turno/rol) del día seleccionado."
+                right={
+                  <div className="flex items-center gap-2">
+                    <Pill cls={selTone.chip} title="Probabilidad de rotura.">{selTone.label} {pct(sel.worst.riskBreak)}</Pill>
+                    <Btn tone="violet" onClick={learn}>Aprender</Btn>
+                  </div>
+                }
+              >
+                <div className="space-y-3">
+                  <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-3">
+                    <div className="text-sm font-semibold text-zinc-900">{sel.storeName}</div>
+                    <div className="mt-1 text-xs text-zinc-600">{sel.region} · Criticidad {sel.criticidad} · Día {dow(dayTs)} {ddmm(dayTs)}</div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <Stat label="Turno/rol" value={`${sel.worst.shift}/${sel.worst.role}`} hint="Dónde duele más hoy." />
+                    <Stat label="Plantilla / mínimo" value={`${sel.worst.planned} / ${sel.worst.minOp}`} hint="Si bajas del mínimo, hay rotura." />
+                    <Stat label="Prob. bajas" value={pct(sel.worst.riskAbs)} hint="Probabilidad agregada de ausencias." />
+                    <Stat label="Coste" value={money(sel.worst.eur)} hint="Coste total esperado." />
+                  </div>
+
+                  <div className="rounded-2xl border border-amber-200 bg-amber-50 p-3">
+                    <div className="text-xs font-semibold text-amber-950">Fuera de presupuesto</div>
+                    <div className="mt-1 text-sm font-semibold text-amber-950">{money(sel.worst.eurNP)}</div>
+                    <div className="mt-1 text-xs text-amber-900">Sobrecoste por urgencia/sustitución (lo que suele doler en P&L).</div>
+                  </div>
+
+                  <div className="rounded-2xl border border-zinc-200 bg-white p-3">
+                    <div className="text-xs font-semibold text-zinc-900">Patrón detectado</div>
+                    <div className="mt-1 text-sm font-semibold text-zinc-900">{sel.worst.pattern}</div>
+                    <div className="mt-1 text-xs text-zinc-600">{sel.worst.why}</div>
+                  </div>
+
+                  <div className="rounded-2xl border border-violet-200 bg-violet-50 p-3">
+                    <div className="text-xs font-semibold text-violet-950">Qué haría ahora</div>
+                    <div className="mt-1 text-sm font-semibold text-violet-950">{bestPlan.name}</div>
+                    <div className="mt-1 text-xs text-violet-900">{bestPlan.desc}</div>
+                    <div className="mt-2 text-xs text-violet-900">Responsable: <span className="font-semibold">{bestPlan.owner}</span> · Plazo: <span className="font-semibold">{bestPlan.deadline}</span></div>
+                    <div className="mt-3 grid grid-cols-2 gap-2">
+                      <Stat
+                        label="Riesgo de rotura"
+                        value={`${pct(sel.worst.riskBreak)} ? ${pct(afterBreak)}`}
+                        hint="Antes ? después si aplicas la acción. Rotura = bajar del mínimo operativo."
+                      />
+                      <Stat label="Ahorro neto" value={money(bestPlan.net)} hint="Ahorro esperado menos lo que cuesta hacerlo." />
+                      <Stat label="Lo que cuesta hacerlo" value={money(bestPlan.cost)} hint="Coste estimado de aplicar la acción." />
+                      <Stat label="€ recuperados por cada €" value={recXText} hint="Ahorro/coste (multiplicador). Ej.: 3,0x." />
+                    </div>
+                  </div>
+                </div>
+              </Card>
+
+              <div className="overflow-hidden rounded-[28px] border border-zinc-200 bg-white shadow-sm">
+                <div className="p-4 bg-gradient-to-br from-zinc-950 via-zinc-900 to-violet-950">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2">
+                      <div className="inline-flex h-10 w-10 items-center justify-center rounded-2xl bg-white/10 border border-white/10">
+                        <Brain className="h-5 w-5 text-white" />
+                      </div>
+                      <div>
+                        <div className="text-sm font-semibold text-white">Copiloto IA</div>
+                        <div className="text-xs text-white/70">Pregúntame sobre el día y la tienda</div>
+                      </div>
+                    </div>
+                    <Pill cls="border-white/10 bg-white/10 text-white">Activo</Pill>
+                  </div>
+
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {["dónde está el mayor riesgo", "detalle de la tienda seleccionada", "por qué"].map((x) => (
+                      <button
+                        key={x}
+                        type="button"
+                        onClick={() => send(x)}
+                        className="rounded-full border border-white/10 bg-white/10 px-3 py-1.5 text-xs font-semibold text-white hover:bg-white/15"
+                      >
+                        {x}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="flex h-[360px] flex-col">
+                  <div className="flex-1 overflow-auto p-4">
+                    <div className="space-y-3">
+                      {msgs.map((m) => (
+                        <div
+                          key={m.id}
+                          className={cn(
+                            "max-w-[95%] rounded-2xl border px-3 py-2 text-xs whitespace-pre-wrap",
+                            m.role === "assistant" ? "border-zinc-200 bg-zinc-50 text-zinc-800" : "ml-auto border-violet-200 bg-violet-50 text-violet-950"
+                          )}
+                        >
+                          {m.text}
+                        </div>
+                      ))}
+                      <div ref={endRef} />
+                    </div>
+                  </div>
+
+                  <div className="border-t border-zinc-200 bg-white p-3">
+                    <div className="flex items-end gap-2">
+                      <textarea
+                        value={draft}
+                        onChange={(e) => setDraft(e.target.value)}
+                        rows={2}
+                        placeholder="Pregunta en lenguaje natural..."
+                        className="w-full resize-none rounded-2xl border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 outline-none focus:ring-2 focus:ring-violet-300"
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" && !e.shiftKey) {
+                            e.preventDefault();
+                            send();
+                          }
+                        }}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => send()}
+                        className="inline-flex h-10 w-10 items-center justify-center rounded-2xl bg-violet-600 text-white shadow-sm transition hover:bg-violet-700 focus:outline-none focus:ring-2 focus:ring-violet-300"
+                        title="Enviar"
+                      >
+                        <ArrowUp className="h-5 w-5" />
+                      </button>
+                    </div>
+                    <div className="mt-2 flex items-center justify-between">
+                      <div className="text-[11px] text-zinc-500">Enter envía · Shift+Enter salto</div>
+                      <button
+                        type="button"
+                        onClick={() => setMsgs((p) => p.slice(0, 1))}
+                        className="rounded-full border border-zinc-200 bg-white px-3 py-1.5 text-xs font-semibold text-zinc-700 hover:bg-zinc-50"
+                      >
+                        Limpiar
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="text-[11px] text-zinc-500">
+                Nota: este “mapa” es una visualización sin geolocalización real. En cliente, podemos usar coordenadas o regiones reales si existen.
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
