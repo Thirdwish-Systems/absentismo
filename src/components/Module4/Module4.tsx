@@ -96,8 +96,9 @@ export default function Module4() {
   return (
     <div className="min-h-screen bg-zinc-50/50">
       {/* Module Top Navigation / Tabs */}
-      <div className="bg-white border-b border-zinc-100 px-8 py-5 flex items-center justify-between sticky top-0 z-40 backdrop-blur-xl bg-white/80">
-        <div className="flex items-center gap-8">
+      {/* Module Top Navigation / Tabs */}
+      <div className="bg-white border-b border-zinc-100 px-4 md:px-8 py-4 md:py-5 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 sticky top-0 z-40 backdrop-blur-xl bg-white/80">
+        <div className="flex flex-col md:flex-row items-start md:items-center gap-4 md:gap-8 w-full md:w-auto">
           <div className="flex items-center gap-3">
             <div className="h-8 w-8 rounded-xl bg-violet-600 flex items-center justify-center text-white shadow-lg shadow-violet-100">
               <Zap size={18} />
@@ -105,11 +106,11 @@ export default function Module4() {
             <h1 className="text-sm font-bold text-zinc-900 tracking-tight uppercase tracking-[0.15em]">Protocolos Hub</h1>
           </div>
 
-          <div className="flex items-center p-1 bg-zinc-100/50 rounded-2xl">
+          <div className="flex items-center p-1 bg-zinc-100/50 rounded-2xl w-full md:w-auto overflow-x-auto">
             <button
               onClick={() => setView('HUB')}
               className={cn(
-                "h-9 px-6 rounded-xl text-[10px] font-bold uppercase tracking-widest transition-all flex items-center gap-2",
+                "flex-1 md:flex-none h-9 px-4 md:px-6 rounded-xl text-[10px] font-bold uppercase tracking-widest transition-all flex items-center justify-center gap-2 whitespace-nowrap",
                 view === 'HUB' ? "bg-white text-zinc-900 shadow-sm" : "text-zinc-400 hover:text-zinc-600"
               )}
             >
@@ -119,7 +120,7 @@ export default function Module4() {
             <button
               onClick={() => setView('MIRROR')}
               className={cn(
-                "h-9 px-6 rounded-xl text-[10px] font-bold uppercase tracking-widest transition-all flex items-center gap-2",
+                "flex-1 md:flex-none h-9 px-4 md:px-6 rounded-xl text-[10px] font-bold uppercase tracking-widest transition-all flex items-center justify-center gap-2 whitespace-nowrap",
                 view === 'MIRROR' ? "bg-white text-zinc-900 shadow-sm" : "text-zinc-400 hover:text-zinc-600"
               )}
             >
@@ -129,7 +130,7 @@ export default function Module4() {
           </div>
         </div>
 
-        <div className="flex items-center gap-6">
+        <div className="flex items-center gap-4 md:gap-6 w-full md:w-auto justify-between md:justify-end">
           <div className="flex items-center gap-4">
             <div className="text-right">
               <div className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest">Activos</div>
@@ -142,7 +143,7 @@ export default function Module4() {
             </div>
           </div>
           {/* Copilot Mini Badge */}
-          <div className="flex items-center gap-2 px-3 py-1.5 bg-violet-50 rounded-full border border-violet-100">
+          <div className="hidden md:flex items-center gap-2 px-3 py-1.5 bg-violet-50 rounded-full border border-violet-100">
             <div className="h-2 w-2 rounded-full bg-violet-500 animate-pulse" />
             <span className="text-[9px] font-bold text-violet-600 uppercase tracking-widest">Copilot Activo</span>
           </div>

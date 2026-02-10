@@ -7,6 +7,7 @@ export interface Scope {
     company?: string;
     province?: string;
     center?: string;
+    centers?: string[]; // Multiple centers for pattern-based protocols
     shift?: string;
     role?: string;
 }
@@ -27,27 +28,39 @@ export interface Risk {
     alternativeSolutionCount?: number;
 }
 
+export interface AutomationTask {
+    id: string;
+    title: string;
+    description: string;
+    owner: string;
+    phone?: string;
+    email?: string;
+    deadline: string; // e.g. "24h", "3 días"
+    targetDate?: string; // Specific ISO date for deadline calculation
+    priority: 'ALTA' | 'MEDIA' | 'BAJA';
+    status: 'PENDIENTE' | 'COMPLETADA' | 'ENTRÁMITE';
+}
+
 export interface Workflow {
     id: string;
+    name: string; // User-facing name
     riskId: string;
+    patternId?: string; // Link to a pattern if applicable
     createdAt: string;
     createdBy: string;
+    severity: Severity;
+    riskDate?: string;
     config: {
-        condition: string; // e.g. "Riesgo > 60%"
+        condition: string;
         scope: Scope;
     };
-    tasks: {
-        id: string;
-        title: string;
-        description: string;
-        owner: string;
-        deadline: string; // e.g. "24h", "3 días"
-        priority: 'ALTA' | 'MEDIA' | 'BAJA';
-        status: 'PENDIENTE' | 'COMPLETADA';
-    }[];
+    tasks: AutomationTask[];
     runsCount: number;
-    successRate: number; // percentage
+    successRate: number;
+    theoreticalSavings: number;
+    realSavings: number;
     savedEur: number;
+    activeStatus: 'ACTIVE' | 'IDLE' | 'DRAFT';
 }
 
 export interface AutomationRun {

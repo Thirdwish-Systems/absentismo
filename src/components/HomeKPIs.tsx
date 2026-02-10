@@ -3,36 +3,24 @@ import { Info, ArrowUp, ArrowDown } from "lucide-react";
 import { fmtEUR, fmtPct, fmtInt, fmtDate } from "../utils/formatters";
 
 // --- TYPES ---
-interface KPIData {
-    asOfDate: Date;
-    costYTD: number;
-    costYTD_LY: number;
-    costToday: number;
-    actionsCompletedYTD: number;
-    costYTD_NoActions: number;
-
-    costRestYear_NoActions: number;
-    costRestYear_LY: number;
-    costRestYear_WithRecommended: number;
+// Re-using KPIState from unifiedMockData for calculating local deltas
+interface CalculatedKPIs extends KPIState {
+    deltaEurYTD: number;
+    deltaPctYTD: number;
+    savingsYTD: number;
+    deltaEurRestYear: number;
+    deltaPctRestYear: number;
+    savingsRestYear: number;
 }
 
-// --- MOCK DATA GENERATOR ---
-// Using specific fixed seed-like logic or static numbers to match "realistic" values prompt asked for
-const MOCK_DATA: KPIData = {
-    asOfDate: new Date(),
-    costYTD: 142500,
-    costYTD_LY: 138000,
-    costToday: 1240,        // Coste estimado solo de hoy
-    actionsCompletedYTD: 24,
-    costYTD_NoActions: 168000,
+import { UNIFIED_MOCK_DATA, KPIState } from "../stores/unifiedMockData";
 
-    costRestYear_NoActions: 850000,
-    costRestYear_LY: 810000,
-    costRestYear_WithRecommended: 790000, // Con plan, baja respecto a NoActions
-};
+// --- MOCK DATA GENERATOR ---
+// Using Single Source of Truth from unifiedMockData
+const MOCK_DATA: KPIState = UNIFIED_MOCK_DATA.KPI;
 
 // --- CALCULATIONS ---
-function calculateKPIs(data: KPIData) {
+function calculateKPIs(data: KPIState): CalculatedKPIs {
     // Section A: YTD
     const deltaEurYTD = data.costYTD - data.costYTD_LY;
     const deltaPctYTD = data.costYTD_LY > 0 ? (deltaEurYTD / data.costYTD_LY) * 100 : 0;
@@ -190,27 +178,19 @@ export default function HomeKPIs() {
                         value={fmtEUR(kpis.costYTD)}
                         tooltip="Coste Empresa del absentismo desde 01/01 hasta hoy. Incluye sustituciones/coberturas. No incluye Mutua/SS."
                     />
-                    {/* A3: Vs LY (YTD) */}
+                    {/* A3: Sobrecoste / Vs LY */}
                     <KPICard
-                        label="Vs LY (YTD)"
+                        label={kpis.deltaEurYTD > 0 ? "Sobrecoste YTD (vs LY)" : "Ahorro vs LY"}
                         value={<DeltaDisplay pct={kpis.deltaPctYTD} eur={kpis.deltaEurYTD} />}
-                        tooltip="Diferencia vs el mismo periodo del año anterior (controla estacionalidad)."
+                        tooltip="Diferencia de coste real acumulado vs mismo periodo año anterior."
                         trend={kpis.deltaEurYTD > 0 ? "up" : "down"}
                         trendColor={kpis.deltaEurYTD > 0 ? "bad" : "good"}
                     />
-                    {/* A4: Acciones cerradas */}
+                    {/* A4: YTD Sin Plan (Counterfactual) */}
                     <KPICard
-                        label="Acciones cerradas"
-                        value={fmtInt(kpis.actionsCompletedYTD)}
-                        tooltip="Acciones COMPLETADAS en el Action Hub dentro del periodo y filtros actuales."
-                        highlight
-                    />
-                    {/* A5: YTD sin plan */}
-                    <KPICard
-                        label="YTD sin plan"
+                        label="YTD Sin Plan (Estimado)"
                         value={fmtEUR(kpis.costYTD_NoActions)}
-                        subtext="Contrafactual"
-                        tooltip="Contrafactual: coste estimado (incl. sustituciones) si este año no hubieras completado acciones."
+                        tooltip="Coste que hubiéramos tenido sin las intervenciones realizadas (Modelo inercial)."
                     />
                     {/* A6: Ahorro YTD */}
                     <KPICard
@@ -267,9 +247,11 @@ export default function HomeKPIs() {
                     <KPICard
                         label={kpis.savingsRestYear >= 0 ? "Ahorro previsto" : "Riesgo sobrecoste"}
                         value={
-                            <span className={kpis.savingsRestYear >= 0 ? "text-emerald-600" : "text-amber-600"}>
-                                {fmtEUR(Math.abs(kpis.savingsRestYear))}
-                            </span>
+                            <a href="#" onClick={(e) => { e.preventDefault(); window.dispatchEvent(new CustomEvent('NAVIGATE_TO', { detail: 'pred' })); }} className="hover:underline decoration-emerald-500/30">
+                                <span className={kpis.savingsRestYear >= 0 ? "text-emerald-600" : "text-amber-600"}>
+                                    {fmtEUR(Math.abs(kpis.savingsRestYear))}
+                                </span>
+                            </a>
                         }
                         tooltip="Ahorro potencial del plan: (sin plan) – (con plan)."
                         highlight

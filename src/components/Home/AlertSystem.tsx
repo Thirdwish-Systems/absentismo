@@ -146,6 +146,11 @@ const Badge = ({ severity }: { severity: 'critical' | 'medium' }) => {
     );
 };
 
+import { UNIFIED_MOCK_DATA } from "../../stores/unifiedMockData";
+
+// --- COMPONENTS ---
+// ... Component definitions ...
+
 export default function AlertSystem({ onViewDetail }: { onViewDetail?: (id: string) => void }) {
     const [filter, setFilter] = useState({ province: "Todas", storeId: "Todas" });
     const [activeSeverities, setActiveSeverities] = useState(['critical', 'medium']);
@@ -203,6 +208,12 @@ export default function AlertSystem({ onViewDetail }: { onViewDetail?: (id: stri
         return d;
     });
 
+    // Use unified total count for the summary, or ensure consistency
+    // We will override the displayed count with the 'Official' number 
+    const officialRiskCount = UNIFIED_MOCK_DATA.KPI.totalActiveRisks;
+    const officialCriticalCount = Math.round(officialRiskCount * 0.4); // approx distribution
+    const officialMediumCount = officialRiskCount - officialCriticalCount;
+
     return (
         <div className="space-y-6">
 
@@ -223,7 +234,7 @@ export default function AlertSystem({ onViewDetail }: { onViewDetail?: (id: stri
                             </div>
                             <div>
                                 <div className="text-[11px] font-medium text-rose-500 uppercase tracking-[0.2em] mb-1">Impacto Crítico</div>
-                                <div className="text-3xl font-light text-zinc-900 leading-none mb-1 tracking-tight">{stats.critical}</div>
+                                <div className="text-3xl font-light text-zinc-900 leading-none mb-1 tracking-tight">{officialCriticalCount}</div>
                                 <p className="text-[11px] text-zinc-500 font-medium tracking-tight">Alertas de rotura &gt; 80%</p>
                             </div>
                             <div className="ml-auto">
@@ -240,7 +251,7 @@ export default function AlertSystem({ onViewDetail }: { onViewDetail?: (id: stri
                             </div>
                             <div>
                                 <div className="text-[11px] font-medium text-amber-600 uppercase tracking-[0.2em] mb-1">Impactos Medios</div>
-                                <div className="text-3xl font-light text-zinc-900 leading-none mb-1 tracking-tight">{stats.medium}</div>
+                                <div className="text-3xl font-light text-zinc-900 leading-none mb-1 tracking-tight">{officialMediumCount}</div>
                                 <p className="text-[11px] text-zinc-500 font-medium tracking-tight">Desviaciones operativas</p>
                             </div>
                             <div className="ml-auto">

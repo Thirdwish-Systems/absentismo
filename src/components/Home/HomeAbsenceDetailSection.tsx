@@ -53,7 +53,7 @@ export default function HomeAbsenceDetailSection() {
     return (
         <div className="bg-white rounded-[40px] border border-zinc-100 p-8 shadow-sm">
             {/* Header with Tooltip/Date */}
-            <div className="flex items-center justify-between mb-8">
+            <div className="flex flex-col md:flex-row md:items-center justify-between mb-8 gap-6 md:gap-0">
                 <div>
                     <div className="flex items-center gap-2 mb-1">
                         <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
@@ -65,13 +65,15 @@ export default function HomeAbsenceDetailSection() {
                     </p>
                 </div>
 
-                <div className="flex items-center gap-2">
-                    <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-zinc-50 border border-zinc-200 text-xs font-medium text-zinc-600">
-                        <Filter className="h-3.5 w-3.5" />
-                        Filtros: <span className="text-zinc-900 font-semibold">{selectedFilter}</span>
+                <div className="flex flex-col md:flex-row items-start md:items-center gap-2 md:gap-4">
+                    <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-zinc-50 border border-zinc-200 text-xs font-medium text-zinc-600 w-full md:w-auto justify-between md:justify-start">
+                        <div className="flex items-center gap-2">
+                            <Filter className="h-3.5 w-3.5" />
+                            Filtros: <span className="text-zinc-900 font-semibold">{selectedFilter}</span>
+                        </div>
                         <ChevronDown className="h-3.5 w-3.5" />
                     </div>
-                    <button className="h-9 w-9 rounded-full bg-violet-600 text-white flex items-center justify-center hover:bg-violet-700 transition-all shadow-sm">
+                    <button className="h-9 w-9 rounded-full bg-violet-600 text-white flex items-center justify-center hover:bg-violet-700 transition-all shadow-sm hidden md:flex">
                         <ExternalLink className="h-4 w-4" />
                     </button>
                 </div>
@@ -100,8 +102,8 @@ export default function HomeAbsenceDetailSection() {
                         <Clock className="h-6 w-6" />
                     </div>
                     <div>
-                        <div className="text-[10px] font-semibold text-zinc-400 uppercase tracking-widest mb-0.5">Minutos perdidos</div>
-                        <div className="text-2xl font-light text-zinc-900 tracking-tight">{MOCK_TODAY_DATA.minutesLost.toLocaleString('es-ES')} <span className="text-sm font-medium text-zinc-400 uppercase tracking-widest">min</span></div>
+                        <div className="text-[10px] font-semibold text-zinc-400 uppercase tracking-widest mb-0.5">Working days lost</div>
+                        <div className="text-2xl font-light text-zinc-900 tracking-tight">{(MOCK_TODAY_DATA.minutesLost / 480).toLocaleString('es-ES')} <span className="text-sm font-medium text-zinc-400 uppercase tracking-widest">days</span></div>
                     </div>
                 </div>
 

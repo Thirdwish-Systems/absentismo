@@ -3,6 +3,8 @@ import SituacionActual from "./SituacionActual";
 import Benchmark from "./Benchmark";
 import EconomicPredictions from "./EconomicPredictions";
 import Historico from "./Historico";
+import AnalyticsDisruptionView from "./AnalyticsDisruptionView";
+import PredictionManager from "./PredictionManager";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Tipos y contexto compartido
@@ -171,6 +173,7 @@ export default function Module2Container() {
         { id: "benchmark", label: "Benchmark", component: Benchmark },
         { id: "pred", label: "Predicciones Económicas", component: EconomicPredictions },
         { id: "historico", label: "Histórico", component: Historico },
+        { id: "disrupcion", label: "Bradford", component: AnalyticsDisruptionView },
     ];
 
     const ActiveComponent = tabs.find((t) => t.id === activeTab)?.component || SituacionActual;

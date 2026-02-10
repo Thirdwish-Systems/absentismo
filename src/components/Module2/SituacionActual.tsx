@@ -12,6 +12,7 @@ import {
     TrendingDown,
     Zap,
 } from "lucide-react";
+import AbsenteeismEvolutionChart from "./AbsenteeismEvolutionChart";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -526,6 +527,8 @@ export default function SituacionActual() {
                                 <div className="mt-1 text-xs text-zinc-500">Rolling 12</div>
                             </div>
                         </div>
+
+                        <AbsenteeismEvolutionChart />
 
                         <Card
                             title={<span>Costes asociados al absentismo <span className="text-zinc-400">(desglose)</span></span>}

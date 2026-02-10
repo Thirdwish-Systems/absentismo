@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useState, useEffect } from "react";
 import {
   LayoutDashboard,
   Activity,
@@ -13,12 +13,14 @@ import {
   AlertTriangle,
   ArrowRight,
   Calendar,
+  X // Added X for closing mobile menu
 } from "lucide-react";
 import Module2Container from "./components/Module2/Module2Container";
 import Module3Container from "./components/Module3/Module3Container";
 import Module4 from "./components/Module4/Module4";
 import HomeKPIs from "./components/HomeKPIs";
 import GlobalCopilot from "./components/GlobalCopilot";
+import PredictionManager from "./components/Module2/PredictionManager";
 import ConfigSettings from "./components/ConfigWizard/ConfigSettings";
 import AlertSystem from "./components/Home/AlertSystem";
 import HomeAbsenceDetailSection from "./components/Home/HomeAbsenceDetailSection";
@@ -90,6 +92,12 @@ function AppContent() {
   const [view, setView] = useState("home");
   const [sb, setSb] = useState(true);
   const [showConfig, setShowConfig] = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false); // Mobile menu state
+
+  // Close mobile menu when view changes
+  useEffect(() => {
+    setMobileMenuOpen(false);
+  }, [view]);
 
   return (
     <div className="flex h-screen bg-[#F7F7F8] font-sans text-zinc-900 overflow-hidden relative">
@@ -99,14 +107,37 @@ function AppContent() {
       {/* GLOBAL COPILOT (Only on Home) */}
       {view === "home" && <GlobalCopilot />}
 
+      {/* MOBILE OVERLAY */}
+      {mobileMenuOpen && (
+        <div
+          className="fixed inset-0 bg-black/20 backdrop-blur-sm z-40 lg:hidden"
+          onClick={() => setMobileMenuOpen(false)}
+        />
+      )}
+
       {/* SIDEBAR */}
-      <aside className={`bg-white border-r border-zinc-200 flex flex-col transition-all duration-300 relative ${sb ? "w-64" : "w-20"}`}>
-        {/* Toggle Button - Float style */}
+      <aside
+        className={`
+          fixed inset-y-0 left-0 z-50 bg-white border-r border-zinc-200 flex flex-col transition-all duration-300 
+          lg:relative lg:translate-x-0
+          ${mobileMenuOpen ? "translate-x-0 shadow-2xl" : "-translate-x-full"}
+          ${sb ? "w-64" : "w-20"}
+        `}
+      >
+        {/* Toggle Button - Float style (Desktop only) */}
         <button
           onClick={() => setSb(!sb)}
-          className="absolute -right-3 top-20 bg-white border border-zinc-200 rounded-full p-1.5 shadow-sm text-zinc-400 hover:text-violet-600 z-50 transition-colors"
+          className="hidden lg:block absolute -right-3 top-20 bg-white border border-zinc-200 rounded-full p-1.5 shadow-sm text-zinc-400 hover:text-violet-600 z-50 transition-colors"
         >
           {sb ? <ChevronRight className="h-3 w-3 rotate-180" /> : <ChevronRight className="h-3 w-3" />}
+        </button>
+
+        {/* Close Button (Mobile only) */}
+        <button
+          onClick={() => setMobileMenuOpen(false)}
+          className="lg:hidden absolute right-4 top-4 p-2 text-zinc-400 hover:text-zinc-900"
+        >
+          <X className="h-5 w-5" />
         </button>
 
         <div className="h-24 flex items-center px-6 border-b border-zinc-50 overflow-hidden">
@@ -169,12 +200,22 @@ function AppContent() {
 
       {/* MAIN */}
       <main className="flex-1 flex flex-col min-w-0">
-        <header className="h-16 bg-white border-b border-zinc-200 px-8 flex items-center justify-between z-10">
+        <header className="h-16 bg-white border-b border-zinc-200 px-4 md:px-8 flex items-center justify-between z-10 sticky top-0">
           <div className="flex items-center gap-3 text-sm font-medium text-zinc-500">
-            Organización <ChevronRight className="h-4 w-4" />
-            <span className="text-zinc-900 font-semibold">{view === "home" ? "Vista General" : view.toUpperCase()}</span>
+            {/* Mobile Menu Button */}
+            <button
+              onClick={() => setMobileMenuOpen(true)}
+              className="lg:hidden p-2 -ml-2 text-zinc-400 hover:text-zinc-900"
+            >
+              <Menu className="h-5 w-5" />
+            </button>
+            <div className="flex items-center gap-2">
+              <span className="hidden md:inline">Organización</span>
+              <ChevronRight className="h-4 w-4 hidden md:block" />
+              <span className="text-zinc-900 font-semibold truncate max-w-[120px] md:max-w-none">{view === "home" ? "Vista General" : view.toUpperCase()}</span>
+            </div>
           </div>
-          <div className="flex gap-4 items-center">
+          <div className="flex gap-2 md:gap-4 items-center">
             <div className="relative hidden md:block">
               <Search className="absolute left-3 top-2.5 h-4 w-4 text-zinc-400" />
               <input
@@ -182,6 +223,10 @@ function AppContent() {
                 placeholder="Buscar empleado, centro..."
               />
             </div>
+            {/* Mobile Search Icon */}
+            <button className="md:hidden h-9 w-9 rounded-xl flex items-center justify-center text-zinc-500">
+              <Search className="h-5 w-5" />
+            </button>
             <button
               onClick={() => setShowConfig(true)}
               className="h-9 w-9 rounded-xl bg-zinc-100 hover:bg-violet-100 flex items-center justify-center text-zinc-500 hover:text-violet-600 transition-colors"
@@ -194,10 +239,10 @@ function AppContent() {
           </div>
         </header>
 
-        <div className="flex-1 overflow-y-auto p-8">
+        <div className="flex-1 overflow-y-auto p-4 md:p-8 scroll-smooth">
           <div className="max-w-[1600px] mx-auto w-full">
             {view === "home" ? (
-              <div className="space-y-12 animate-in fade-in duration-500 pb-20">
+              <div className="space-y-8 md:space-y-12 animate-in fade-in duration-500 pb-20">
                 {/* SECTION 1: ACTUALIDAD */}
                 <section>
                   <div className="flex items-center gap-3 mb-6">
@@ -230,7 +275,7 @@ function AppContent() {
                 </section>
               </div>
             ) : (
-              view === "cost" ? <Module2Container /> : view === "pred" ? <Module3Container /> : <Module4 />
+              view === "cost" ? <Module2Container /> : view === "pred" ? <PredictionManager /> : <Module4 />
             )}
           </div>
         </div>
