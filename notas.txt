@@ -1,0 +1,46 @@
+===========================================================
+INSTRUCCIONES PARA DESPLEGAR EN GITHUB PAGES (VITE + TS)
+===========================================================
+
+1. INSTALACIÓN DE DEPENDENCIA:
+------------------------------
+Ejecutar en la terminal:
+npm install gh-pages --save-dev
+
+
+2. CONFIGURAR PACKAGE.JSON:
+---------------------------
+Añadir (o sustituir) estas propiedades en el archivo package.json:
+
+"homepage": "https://Thirdwish-Systems.github.io/absentismo",
+
+En la sección de "scripts":
+"predeploy": "npm run build",
+"deploy": "gh-pages -d dist"
+
+
+3. CONFIGURAR VITE.CONFIG.TS:
+-----------------------------
+Asegurarse de añadir la propiedad 'base' con el nombre del repo:
+
+export default defineConfig({
+  plugins: [react()],
+  base: '/absentismo/',
+})
+
+
+4. COMANDO DE DESPLIEGUE:
+-------------------------
+Cada vez que quieras subir cambios, ejecuta:
+npm run deploy
+
+
+5. AJUSTE FINAL EN GITHUB (Solo la primera vez):
+------------------------------------------------
+- Ir a tu repo en GitHub -> Settings -> Pages.
+- En "Build and deployment" -> "Branch".
+- Seleccionar rama: 'gh-pages' / Carpeta: '/(root)'.
+- Guardar.
+
+URL de la App: https://Thirdwish-Systems.github.io/absentismo/
+===========================================================
